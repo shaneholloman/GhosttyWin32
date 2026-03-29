@@ -186,7 +186,7 @@ bool GhosttyBridge::initOpenGL(HWND hwnd) {
     typedef BOOL (WINAPI *PFNWGLSWAPINTERVALEXTPROC)(int interval);
     auto wglSwapIntervalEXT = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
     if (wglSwapIntervalEXT) {
-        wglSwapIntervalEXT(m_vsync ? 1 : 0);
+        wglSwapIntervalEXT(0); // V-Sync OFF for low latency
         DBG_LOG(m_vsync ? "ghostty: V-Sync ON\n" : "ghostty: V-Sync OFF\n");
     }
 
@@ -274,6 +274,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         int len = WideCharToMultiByte(CP_UTF8, 0, utf16, utf16Len, utf8, sizeof(utf8), nullptr, nullptr);
         if (len > 0) {
             ghostty_surface_text(bridge.m_surface, utf8, len);
+            if (bridge.m_app) ghostty_app_tick(bridge.m_app);
             ghostty_surface_refresh(bridge.m_surface);
         }
         return 0;
@@ -373,6 +374,11 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     }
     case WM_ERASEBKGND:
         return 1; // Skip background erase to prevent flicker
+    case WM_PAINT: {
+        // Validate the region without drawing - OpenGL renderer handles all drawing
+        ValidateRect(hwnd, nullptr);
+        return 0;
+    }
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
         if (bridge.m_minWidth > 0) mmi->ptMinTrackSize.x = bridge.m_minWidth;
