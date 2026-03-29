@@ -28,13 +28,17 @@ jobs:
           version: 0.15.2
 
       - name: Build ghostty.dll
-        shell: bash
+        shell: pwsh
         run: |
           cd ghostty
           zig build -Doptimize=ReleaseSafe
-          cp zig-out/lib/ghostty.dll ../ghostty/
-          # Find import library in zig cache (path varies by environment)
-          find . "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR" -name "ghostty.lib" -size -100k 2>/dev/null | head -1 | xargs -I{} cp {} ../ghostty/
+          Copy-Item zig-out/lib/ghostty.dll ../ghostty/
+          # Find import library (small ~60KB, not the large static lib)
+          $lib = Get-ChildItem -Path . -Recurse -Filter "ghostty.lib" | Where-Object { $_.Length -lt 100KB } | Select-Object -First 1
+          if (-not $lib) {
+            $lib = Get-ChildItem -Path $env:ZIG_LOCAL_CACHE_DIR -Recurse -Filter "ghostty.lib" | Where-Object { $_.Length -lt 100KB } | Select-Object -First 1
+          }
+          if ($lib) { Copy-Item $lib.FullName ../ghostty/ } else { Write-Error "ghostty.lib not found"; exit 1 }
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
