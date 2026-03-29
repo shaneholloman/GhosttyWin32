@@ -1,4 +1,5 @@
 #include "framework.h"
+#include <dwmapi.h>
 #include "GhosttyBridge.h"
 
 int APIENTRY wWinMain(
@@ -23,6 +24,37 @@ int APIENTRY wWinMain(
 
     // Create surface (standalone Win32 window)
     bridge.createSurface(nullptr);
+
+    // Apply config-driven window settings
+    if (HWND hwnd = bridge.glWindow()) {
+        // window-decoration
+        const char* decorVal = nullptr;
+        if (ghostty_config_get(bridge.config(), &decorVal, "window-decoration", 17) && decorVal) {
+            if (strcmp(decorVal, "false") == 0 || strcmp(decorVal, "none") == 0) {
+                DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+                // Keep WS_THICKFRAME for smooth DWM resize, hide caption visually
+                style = (style & ~(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_THICKFRAME;
+                bridge.setDecorations(false);
+                SetWindowLongW(hwnd, GWL_STYLE, style);
+                SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+        }
+
+        // background-opacity
+        double opacity = 1.0;
+        ghostty_config_get(bridge.config(), &opacity, "background-opacity", 18);
+        if (opacity < 1.0) {
+            // Make window layered for transparency
+            DWORD exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            SetWindowLongW(hwnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(hwnd, 0, (BYTE)(opacity * 255), LWA_ALPHA);
+
+            // Also extend frame into client area for DWM composition
+            MARGINS margins = { -1, -1, -1, -1 };
+            DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
+    }
 
     // Message loop
     MSG msg;

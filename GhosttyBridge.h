@@ -18,6 +18,7 @@ public:
     void shutdown();
 
     ghostty_app_t app() const { return m_app; }
+    ghostty_config_t config() const { return m_config; }
     bool isInitialized() const { return m_initialized; }
 
     // Surface creation/destruction
@@ -25,6 +26,7 @@ public:
     ghostty_surface_t createSurface(HWND parentHwnd);
     void destroySurface(ghostty_surface_t surface);
     HWND glWindow() const { return m_glWindow; }
+    void setDecorations(bool enabled) { m_decorations = enabled; }
 
 private:
     GhosttyBridge() = default;

@@ -214,6 +214,43 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     auto& bridge = GhosttyBridge::instance();
 
     switch (msg) {
+    case WM_NCCALCSIZE: {
+        // When decorations are hidden, extend client area to cover the entire window
+        if (!bridge.m_decorations && wParam == TRUE) {
+            // Return 0 to make client area = window area (no frame)
+            return 0;
+        }
+        break;
+    }
+    case WM_NCHITTEST: {
+        // Allow drag and resize when window decorations are hidden
+        if (!bridge.m_decorations) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            const int border = 6; // resize border width in pixels
+
+            // Edges and corners for resize
+            bool left = pt.x < border;
+            bool right = pt.x >= rc.right - border;
+            bool top = pt.y < border;
+            bool bottom = pt.y >= rc.bottom - border;
+
+            if (top && left) return HTTOPLEFT;
+            if (top && right) return HTTOPRIGHT;
+            if (bottom && left) return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+
+            // Top 30px = draggable title bar area
+            if (pt.y < 30) return HTCAPTION;
+        }
+        break;
+    }
     case WM_CHAR: {
         if (!bridge.m_surface || wParam < 0x20) return 0;
         // Handle UTF-16 surrogate pairs (emoji etc.)
@@ -354,12 +391,17 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         PostQuitMessage(0);
         return 0;
     case WM_SIZE: {
+        // Defer to WM_EXITSIZEMOVE for interactive resize
+        return 0;
+    }
+    case WM_EXITSIZEMOVE: {
         if (bridge.m_surface) {
-            UINT width = LOWORD(lParam);
-            UINT height = HIWORD(lParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            UINT width = rc.right - rc.left;
+            UINT height = rc.bottom - rc.top;
             if (width > 0 && height > 0) {
                 ghostty_surface_set_size(bridge.m_surface, width, height);
-
             }
         }
         return 0;
@@ -509,7 +551,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     case WM_KILLFOCUS:
         if (bridge.m_surface) ghostty_surface_set_focus(bridge.m_surface, false);
         return 0;
-    case WM_USER + 1:
+case WM_USER + 1:
         // Wakeup from ghostty - process pending events on main thread
         if (bridge.m_app) ghostty_app_tick(bridge.m_app);
         return 0;
