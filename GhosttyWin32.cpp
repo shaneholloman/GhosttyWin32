@@ -15,6 +15,12 @@ int APIENTRY wWinMain(
     // Enable Per-Monitor DPI awareness
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+    // Default to Mesa Zink (GL→Vulkan) for flicker-free rendering.
+    // Set before any OpenGL calls. Users can override with GALLIUM_DRIVER env var.
+    if (!GetEnvironmentVariableA("GALLIUM_DRIVER", nullptr, 0)) {
+        SetEnvironmentVariableA("GALLIUM_DRIVER", "zink");
+    }
+
     // Initialize libghostty
     auto& bridge = GhosttyBridge::instance();
     if (!bridge.initialize()) {
