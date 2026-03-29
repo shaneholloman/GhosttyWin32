@@ -237,6 +237,10 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                         CloseClipboard();
                     }
                 }
+                // Clear selection by sending a left click at current position
+                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_refresh(bridge.m_surface);
                 return 0;
             }
             // No selection - fall through to send Ctrl+C as key event
@@ -338,11 +342,9 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     }
     case WM_RBUTTONDOWN: {
         if (bridge.m_surface) {
-            // If there's a selection, copy to clipboard
             if (ghostty_surface_has_selection(bridge.m_surface)) {
                 ghostty_text_s text = {};
                 if (ghostty_surface_read_selection(bridge.m_surface, &text) && text.text && text.text_len > 0) {
-                    // Convert UTF-8 to UTF-16 for clipboard
                     int wlen = MultiByteToWideChar(CP_UTF8, 0, text.text, (int)text.text_len, nullptr, 0);
                     if (wlen > 0 && OpenClipboard(hwnd)) {
                         EmptyClipboard();
@@ -357,8 +359,11 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                         CloseClipboard();
                     }
                 }
+                // Clear selection
+                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_refresh(bridge.m_surface);
             } else {
-                // No selection - pass right click to ghostty
                 ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
             }
         }
@@ -367,6 +372,14 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     case WM_RBUTTONUP: {
         if (bridge.m_surface) {
             ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
+        }
+        return 0;
+    }
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP: {
+        if (bridge.m_surface) {
+            auto state = (msg == WM_MBUTTONDOWN) ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE;
+            ghostty_surface_mouse_button(bridge.m_surface, state, GHOSTTY_MOUSE_MIDDLE, GHOSTTY_MODS_NONE);
         }
         return 0;
     }
@@ -597,9 +610,37 @@ void GhosttyBridge::onConfirmReadClipboard(void* userdata, const char* content, 
 }
 
 void GhosttyBridge::onWriteClipboard(void* userdata, ghostty_clipboard_e clipboard, const ghostty_clipboard_content_s* content, size_t count, bool confirm) {
-    DBG_LOG("ghostty: write clipboard\n");
+    auto* self = static_cast<GhosttyBridge*>(userdata);
+    if (!self || !self->m_glWindow || count == 0 || !content) return;
+
+    // Find text content
+    const char* text = nullptr;
+    for (size_t i = 0; i < count; i++) {
+        if (content[i].data) {
+            text = content[i].data;
+            break;
+        }
+    }
+    if (!text || !text[0]) return;
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+    if (wlen <= 0 || !OpenClipboard(self->m_glWindow)) return;
+
+    EmptyClipboard();
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (wlen + 1) * sizeof(wchar_t));
+    if (hMem) {
+        wchar_t* wBuf = static_cast<wchar_t*>(GlobalLock(hMem));
+        MultiByteToWideChar(CP_UTF8, 0, text, -1, wBuf, wlen);
+        wBuf[wlen] = 0;
+        GlobalUnlock(hMem);
+        SetClipboardData(CF_UNICODETEXT, hMem);
+    }
+    CloseClipboard();
 }
 
 void GhosttyBridge::onCloseSurface(void* userdata, bool process_exited) {
-    DBG_LOG("ghostty: close surface\n");
+    auto* self = static_cast<GhosttyBridge*>(userdata);
+    if (process_exited && self && self->m_glWindow) {
+        PostMessageW(self->m_glWindow, WM_CLOSE, 0, 0);
+    }
 }
