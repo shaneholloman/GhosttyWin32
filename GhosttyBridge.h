@@ -3,7 +3,7 @@
 #include <Windows.h>
 #include <GL/gl.h>
 
-// Bridge between libghostty and WinUI
+// Bridge between libghostty and Win32
 // Equivalent to the Swift AppDelegate on macOS
 
 class GhosttyBridge {
@@ -31,7 +31,7 @@ private:
     GhosttyBridge(const GhosttyBridge&) = delete;
     GhosttyBridge& operator=(const GhosttyBridge&) = delete;
 
-    // Runtime callbacks (libghostty -> WinUI)
+    // Runtime callbacks (libghostty -> Win32)
     static void onWakeup(void* userdata);
     static bool onAction(ghostty_app_t app, ghostty_target_s target, ghostty_action_s action);
     static bool onReadClipboard(void* userdata, ghostty_clipboard_e clipboard, void* state);
@@ -56,8 +56,4 @@ private:
     bool m_vsync = false;  // V-Sync off by default for low latency
     bool m_initialized = false;
 
-public:
-    // Performance tracking
-    LARGE_INTEGER m_lastInputTime = {};
-    bool m_inputPending = false;
 };

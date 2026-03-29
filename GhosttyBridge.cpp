@@ -495,21 +495,8 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         if (bridge.m_surface) ghostty_surface_set_focus(bridge.m_surface, false);
         return 0;
     case WM_USER + 1:
+        // Wakeup from ghostty - process pending events on main thread
         if (bridge.m_app) ghostty_app_tick(bridge.m_app);
-        // Measure input latency
-        if (bridge.m_inputPending) {
-            bridge.m_inputPending = false;
-            LARGE_INTEGER now, freq;
-            QueryPerformanceCounter(&now);
-            QueryPerformanceFrequency(&freq);
-            double ms = (double)(now.QuadPart - bridge.m_lastInputTime.QuadPart) / freq.QuadPart * 1000.0;
-            static int count = 0;
-            if (++count % 5 == 0) {
-                wchar_t title[64];
-                swprintf_s(title, L"Ghostty [%.1fms]", ms);
-                SetWindowTextW(hwnd, title);
-            }
-        }
         return 0;
     }
 
@@ -630,8 +617,9 @@ void GhosttyBridge::destroySurface(ghostty_surface_t surface) {
 
 void GhosttyBridge::onWakeup(void* userdata) {
     auto* self = static_cast<GhosttyBridge*>(userdata);
-    if (self && self->m_app) {
-        ghostty_app_tick(self->m_app);
+    // Post to main thread - onWakeup may be called from any thread
+    if (self && self->m_glWindow) {
+        PostMessageW(self->m_glWindow, WM_USER + 1, 0, 0);
     }
 }
 
@@ -688,6 +676,7 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         return true;
 
     case GHOSTTY_ACTION_OPEN_URL:
+        OutputDebugStringA("ghostty: OPEN_URL action received\n");
         if (action.action.open_url.url) {
             // Convert URL to wide string and open
             int wlen = MultiByteToWideChar(CP_UTF8, 0, action.action.open_url.url,
