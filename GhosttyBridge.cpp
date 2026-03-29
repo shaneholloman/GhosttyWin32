@@ -237,7 +237,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         int len = WideCharToMultiByte(CP_UTF8, 0, utf16, utf16Len, utf8, sizeof(utf8), nullptr, nullptr);
         if (len > 0) {
             ghostty_surface_text(bridge.m_surface, utf8, len);
-            ghostty_surface_refresh(bridge.m_surface);
+
         }
         return 0;
     }
@@ -270,7 +270,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 // Clear selection
                 ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
                 ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
-                ghostty_surface_refresh(bridge.m_surface);
+
                 return 0;
             }
             // No selection - fall through to send Ctrl+C as key event
@@ -332,7 +332,6 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             }
         }
 
-        ghostty_surface_refresh(bridge.m_surface);
         return 0;
     }
     case WM_ERASEBKGND:
@@ -360,7 +359,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             UINT height = HIWORD(lParam);
             if (width > 0 && height > 0) {
                 ghostty_surface_set_size(bridge.m_surface, width, height);
-                ghostty_surface_refresh(bridge.m_surface);
+
             }
         }
         return 0;
@@ -399,7 +398,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 // Clear selection
                 ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
                 ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
-                ghostty_surface_refresh(bridge.m_surface);
+
             } else {
                 ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
             }
