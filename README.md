@@ -108,21 +108,19 @@ Copy the following files to `GhosttyWin32/ghostty/`:
 
 Open `GhosttyWin32.slnx` in Visual Studio, set to **Release | x64**, and build.
 
-### Mesa Zink Setup
+### Mesa Zink Setup (Required)
 
 Download [mesa-dist-win](https://github.com/pal1000/mesa-dist-win/releases) (MSVC release) and copy to the exe directory:
 - `x64/opengl32.dll`
 - `x64/libgallium_wgl.dll`
 
-Set environment variable before launching:
-```
-set GALLIUM_DRIVER=zink
-```
+Mesa Zink is used by default for flicker-free rendering (GL-to-Vulkan translation). The app sets `GALLIUM_DRIVER=zink` automatically at startup.
+
+To use native OpenGL instead (lower latency but may flicker), set `GALLIUM_DRIVER=` (empty) or remove the Mesa DLLs.
 
 ### Run
 
 ```bash
-set GALLIUM_DRIVER=zink
 GhosttyWin32.exe
 ```
 
