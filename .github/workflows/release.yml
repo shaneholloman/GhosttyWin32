@@ -33,12 +33,18 @@ jobs:
           cd ghostty
           zig build -Doptimize=ReleaseSafe
           Copy-Item zig-out/lib/ghostty.dll ../ghostty/
-          # Find import library (small ~60KB, not the large static lib)
-          $lib = Get-ChildItem -Path . -Recurse -Filter "ghostty.lib" | Where-Object { $_.Length -lt 100KB } | Select-Object -First 1
-          if (-not $lib) {
-            $lib = Get-ChildItem -Path $env:ZIG_LOCAL_CACHE_DIR -Recurse -Filter "ghostty.lib" | Where-Object { $_.Length -lt 100KB } | Select-Object -First 1
+          # Find import library (small ~60KB)
+          $lib = Get-ChildItem -Path ., $env:ZIG_LOCAL_CACHE_DIR -Recurse -Filter "ghostty.lib" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Length -lt 100KB -and $_.Length -gt 10KB } |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
+          if ($lib) {
+            Copy-Item $lib.FullName ../ghostty/
+            Write-Host "Found import lib: $($lib.FullName) ($($lib.Length) bytes)"
+          } else {
+            Write-Error "ghostty.lib import library not found"
+            exit 1
           }
-          if ($lib) { Copy-Item $lib.FullName ../ghostty/ } else { Write-Error "ghostty.lib not found"; exit 1 }
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
