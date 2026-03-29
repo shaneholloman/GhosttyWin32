@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout GhosttyWin32
+        uses: actions/checkout@v4
+
+      - name: Checkout ghostty fork
+        uses: actions/checkout@v4
+        with:
+          repository: i999rri/ghostty
+          ref: windows-port
+          path: ghostty
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build ghostty.dll
+        shell: bash
+        run: |
+          cd ghostty
+          zig build -Doptimize=ReleaseSafe
+          cp zig-out/lib/ghostty.dll ../ghostty/
+          # Find and copy the import library (small one ~60KB)
+          find .zig-cache -name "ghostty.lib" -size -100k -newer zig-out/lib/ghostty.dll -exec cp {} ../ghostty/ \;
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build GhosttyWin32.exe
+        run: |
+          msbuild GhosttyWin32.vcxproj /p:Configuration=Release /p:Platform=x64
+
+      - name: Download Mesa Zink
+        shell: bash
+        run: |
+          MESA_VERSION=$(gh release list -R pal1000/mesa-dist-win -L 1 --json tagName -q '.[0].tagName')
+          gh release download "$MESA_VERSION" -R pal1000/mesa-dist-win -p "mesa3d-*-release-msvc.7z" -D .
+          7z x mesa3d-*-release-msvc.7z -omesa -y
+          cp mesa/x64/opengl32.dll x64/Release/
+          cp mesa/x64/libgallium_wgl.dll x64/Release/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p GhosttyWin32
+          cp x64/Release/GhosttyWin32.exe GhosttyWin32/
+          cp x64/Release/ghostty.dll GhosttyWin32/
+          cp x64/Release/opengl32.dll GhosttyWin32/
+          cp x64/Release/libgallium_wgl.dll GhosttyWin32/
+          7z a GhosttyWin32-${{ github.ref_name }}-x64.zip GhosttyWin32/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: GhosttyWin32-${{ github.ref_name }}-x64.zip
+          generate_release_notes: true
