@@ -51,7 +51,7 @@ jobs:
 
       - name: Build GhosttyWin32.exe
         run: |
-          msbuild GhosttyWin32.vcxproj /p:Configuration=Release /p:Platform=x64
+          msbuild GhosttyWin32.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
 
       - name: Download Mesa Zink
         shell: bash
