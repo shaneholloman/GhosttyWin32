@@ -18,6 +18,9 @@
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "gdi32.lib")
 
+// DirectX renderer: notify resize from main thread (exported from ghostty.dll)
+extern "C" void dx_notify_resize(uint32_t w, uint32_t h);
+
 // Helper: copy UTF-8 text to Windows clipboard
 static bool copyToClipboard(HWND hwnd, const char* utf8, size_t utf8Len) {
     int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)utf8Len, nullptr, 0);
@@ -397,10 +400,12 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         PostQuitMessage(0);
         return 0;
     case WM_SIZE: {
-        if (bridge.m_surface) {
-            UINT width = LOWORD(lParam);
-            UINT height = HIWORD(lParam);
-            if (width > 0 && height > 0) {
+        UINT width = LOWORD(lParam);
+        UINT height = HIWORD(lParam);
+        if (width > 0 && height > 0) {
+            // Notify DirectX renderer of new size (thread-safe atomic write)
+            dx_notify_resize(width, height);
+            if (bridge.m_surface) {
                 ghostty_surface_set_size(bridge.m_surface, width, height);
                 ghostty_surface_refresh(bridge.m_surface);
             }
@@ -624,17 +629,29 @@ ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
         [](LPVOID param) -> DWORD {
             auto* a = static_cast<Args*>(param);
 
-            // Create and activate OpenGL context on this thread
-            if (!a->self->initOpenGL(a->hwnd)) {
-                DBG_LOG("ghostty: OpenGL init failed\n");
-                return 1;
+            // Check if using DirectX renderer (skip OpenGL init)
+            char rendererBuf[32] = {};
+            GetEnvironmentVariableA("GHOSTTY_RENDERER", rendererBuf, sizeof(rendererBuf));
+            bool useDirectX = (strcmp(rendererBuf, "directx") == 0);
+            {
+                char logBuf[128];
+                sprintf_s(logBuf, "ghostty: GHOSTTY_RENDERER=%s useDirectX=%d\n", rendererBuf, useDirectX);
+                OutputDebugStringA(logBuf);
+            }
+
+            if (!useDirectX) {
+                // Create and activate OpenGL context on this thread
+                if (!a->self->initOpenGL(a->hwnd)) {
+                    DBG_LOG("ghostty: OpenGL init failed\n");
+                    return 1;
+                }
             }
 
             ghostty_surface_config_s surfConfig = ghostty_surface_config_new();
             surfConfig.platform_tag = GHOSTTY_PLATFORM_WINDOWS;
             surfConfig.platform.windows.hwnd = a->hwnd;
-            surfConfig.platform.windows.hdc = a->self->m_hdc;
-            surfConfig.platform.windows.hglrc = a->self->m_hglrc;
+            surfConfig.platform.windows.hdc = useDirectX ? nullptr : a->self->m_hdc;
+            surfConfig.platform.windows.hglrc = useDirectX ? nullptr : a->self->m_hglrc;
             // Get DPI scale factor
             UINT dpi = GetDpiForWindow(a->self->m_glWindow);
             surfConfig.scale_factor = (double)dpi / 96.0;
@@ -642,7 +659,7 @@ ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
             a->result = ghostty_surface_new(a->self->m_app, &surfConfig);
 
             // Release GL context BEFORE thread exits so renderer thread can acquire it
-            wglMakeCurrent(nullptr, nullptr);
+            if (!useDirectX) wglMakeCurrent(nullptr, nullptr);
             return 0;
         },
         &args, 0, nullptr);
@@ -658,6 +675,7 @@ ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
     if (args.result) {
         DBG_LOG("ghostty: surface created!\n");
         m_surface = args.result;
+
     } else {
         DBG_LOG("ghostty: surface creation failed\n");
     }
