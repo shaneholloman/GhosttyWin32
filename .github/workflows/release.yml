@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: i999rri/ghostty
-          ref: windows-port
+          ref: directx11-renderer
           path: ghostty
 
       - name: Setup Zig
@@ -31,11 +31,14 @@ jobs:
         shell: pwsh
         run: |
           cd ghostty
-          zig build -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe -Drenderer=directx
           Copy-Item zig-out/lib/ghostty.dll ../ghostty/
           Copy-Item include/ghostty.h ../ghostty/
-          # Find import library (small ~60KB)
-          $lib = Get-ChildItem -Path ., $env:ZIG_LOCAL_CACHE_DIR -Recurse -Filter "ghostty.lib" -ErrorAction SilentlyContinue |
+          # Find import library (small ~60KB, in zig-cache or local cache)
+          $searchPaths = @(".")
+          if ($env:ZIG_LOCAL_CACHE_DIR) { $searchPaths += $env:ZIG_LOCAL_CACHE_DIR }
+          if (Test-Path "$env:LOCALAPPDATA\zig") { $searchPaths += "$env:LOCALAPPDATA\zig" }
+          $lib = Get-ChildItem -Path $searchPaths -Recurse -Filter "ghostty.lib" -ErrorAction SilentlyContinue |
                  Where-Object { $_.Length -lt 100KB -and $_.Length -gt 10KB } |
                  Sort-Object LastWriteTime -Descending |
                  Select-Object -First 1
