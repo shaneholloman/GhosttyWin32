@@ -77,7 +77,7 @@ ghostty.dll (Zig, from i999rri/ghostty windows-port branch)
   └── Windows font discovery (registry lookup, %WINDIR%\Fonts)
 
 [Optional] Mesa Zink (opengl32.dll + libgallium_wgl.dll)
-  └��─ Translates OpenGL 4.6 → Vulkan (only needed for OpenGL fallback)
+  └── Translates OpenGL 4.6 → Vulkan (only needed for OpenGL fallback)
 ```
 
 ## Install
