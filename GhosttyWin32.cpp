@@ -63,6 +63,10 @@ int APIENTRY wWinMain(
                 // Keep WS_THICKFRAME for smooth DWM resize, hide caption visually
                 style = (style & ~(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_THICKFRAME;
                 session->decorations = false;
+                // Reserve a 32px header at the top so the user can drag the
+                // window even though the native caption is hidden. The drag
+                // region is delivered via WM_NCHITTEST → HTCAPTION.
+                session->headerHeight = 32;
                 SetWindowLongW(hwnd, GWL_STYLE, style);
                 SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);

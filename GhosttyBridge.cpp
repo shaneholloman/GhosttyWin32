@@ -538,7 +538,9 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         }
         break;
     case WM_NCHITTEST:
-        // Allow drag and resize when window decorations are hidden
+        // Allow drag and resize when window decorations are hidden.
+        // The header area (headerHeight px at top) acts as the drag region
+        // since there's no native title bar.
         if (sess && !sess->decorations) {
             RECT rc;
             GetClientRect(hwnd, &rc);
@@ -557,7 +559,7 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             if (right) return HTRIGHT;
             if (top) return HTTOP;
             if (bottom) return HTBOTTOM;
-            if (pt.y < 30) return HTCAPTION;
+            if (pt.y < sess->headerHeight) return HTCAPTION;
         }
         break;
 
@@ -572,12 +574,15 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         return 0;
 
     case WM_SIZE: {
-        // Resize the rendering child to fill our client area.
+        // Resize the rendering child to fill our client area below the header.
         // The child's WM_SIZE handler notifies the renderer + ghostty surface.
         if (sess && sess->hwnd) {
-            UINT width = LOWORD(lParam);
-            UINT height = HIWORD(lParam);
-            SetWindowPos(sess->hwnd, nullptr, 0, 0, width, height,
+            int width = LOWORD(lParam);
+            int height = HIWORD(lParam);
+            int top = sess->headerHeight;
+            int childHeight = height - top;
+            if (childHeight < 1) childHeight = 1;
+            SetWindowPos(sess->hwnd, nullptr, 0, top, width, childHeight,
                 SWP_NOZORDER | SWP_NOACTIVATE);
         }
         return 0;
@@ -648,10 +653,11 @@ HWND GhosttyBridge::createGLWindow(HWND parent, TerminalSession* session) {
 
     RECT rc;
     GetClientRect(parent, &rc);
+    int top = session ? session->headerHeight : 0;
     HWND hwnd = CreateWindowExW(
         0, L"GhosttyGLWindow", nullptr,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-        0, 0, rc.right - rc.left, rc.bottom - rc.top,
+        0, top, rc.right - rc.left, (rc.bottom - rc.top) - top,
         parent, nullptr, GetModuleHandleW(nullptr), session);
 
     if (hwnd) {
@@ -919,13 +925,22 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         if (sess && hwnd) {
             sess->decorations = !sess->decorations;
             DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
-            if (sess->decorations)
+            if (sess->decorations) {
                 style |= WS_OVERLAPPEDWINDOW;
-            else
-                style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+                sess->headerHeight = 0;
+            } else {
+                // Keep WS_THICKFRAME so the user can still resize from edges.
+                style = (style & ~(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_THICKFRAME;
+                sess->headerHeight = 32;
+            }
             SetWindowLongW(hwnd, GWL_STYLE, style);
             SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            // Force a relayout of the rendering child to honor the new header.
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED,
+                MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top));
         }
         return true;
 
