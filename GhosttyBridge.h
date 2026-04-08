@@ -13,19 +13,24 @@
 // Stored in HWND GWLP_USERDATA and in ghostty_surface userdata for fast lookup.
 struct TerminalSession {
     ghostty_surface_t surface = nullptr;
+
+    // Top-level window that hosts the rendering child. Owns title, frame,
+    // fullscreen state, size limits, and receives close/dpi events.
+    HWND parentHwnd = nullptr;
+    // Child window the renderer draws into and that receives input events.
     HWND hwnd = nullptr;
 
     // OpenGL renderer state (unused in DirectX mode)
     HDC hdc = nullptr;
     HGLRC hglrc = nullptr;
 
-    // Window state for fullscreen/decorations toggle
+    // Window state for fullscreen/decorations toggle (apply to parentHwnd)
     bool fullscreen = false;
     bool decorations = true;
     RECT savedRect = {};
     DWORD savedStyle = 0;
 
-    // Size limits from ghostty config
+    // Size limits from ghostty config (enforced on parentHwnd via WM_GETMINMAXINFO)
     uint32_t minWidth = 0, minHeight = 0;
     uint32_t maxWidth = 0, maxHeight = 0;
 };
@@ -65,6 +70,10 @@ private:
     static void onConfirmReadClipboard(void* userdata, const char* content, void* state, ghostty_clipboard_request_e req);
     static void onWriteClipboard(void* userdata, ghostty_clipboard_e clipboard, const ghostty_clipboard_content_s* content, size_t count, bool confirm);
     static void onCloseSurface(void* userdata, bool process_exited);
+
+    // Top-level window that hosts the rendering child window.
+    static LRESULT CALLBACK mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    HWND createMainWindow(TerminalSession* session);
 
     // Win32 child window for OpenGL/DirectX rendering
     static LRESULT CALLBACK glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);

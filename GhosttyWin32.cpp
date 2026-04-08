@@ -31,8 +31,8 @@ int APIENTRY wWinMain(
     // Create surface (standalone Win32 window)
     TerminalSession* session = bridge.createSurface(nullptr);
 
-    // Apply config-driven window settings
-    if (HWND hwnd = session ? session->hwnd : nullptr) {
+    // Apply config-driven window settings to the top-level main window
+    if (HWND hwnd = session ? session->parentHwnd : nullptr) {
         // window-decoration
         const char* decorVal = nullptr;
         if (ghostty_config_get(bridge.config(), &decorVal, "window-decoration", 17) && decorVal) {
@@ -53,6 +53,12 @@ int APIENTRY wWinMain(
 
         // background-opacity is handled by ghostty's renderer internally.
         // No Win32-level transparency needed (DWM compositing is expensive).
+    }
+
+    // Move focus to the rendering child so keyboard/IME input works on first
+    // activation (otherwise the user has to alt-tab away and back).
+    if (session && session->hwnd) {
+        SetFocus(session->hwnd);
     }
 
     // Message loop

@@ -241,43 +241,6 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     const bool hasSurface = sess && sess->surface;
 
     switch (msg) {
-    case WM_NCCALCSIZE: {
-        // When decorations are hidden, extend client area to cover the entire window
-        if (sess && !sess->decorations && wParam == TRUE) {
-            // Return 0 to make client area = window area (no frame)
-            return 0;
-        }
-        break;
-    }
-    case WM_NCHITTEST: {
-        // Allow drag and resize when window decorations are hidden
-        if (sess && !sess->decorations) {
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            ScreenToClient(hwnd, &pt);
-            const int border = 6; // resize border width in pixels
-
-            // Edges and corners for resize
-            bool left = pt.x < border;
-            bool right = pt.x >= rc.right - border;
-            bool top = pt.y < border;
-            bool bottom = pt.y >= rc.bottom - border;
-
-            if (top && left) return HTTOPLEFT;
-            if (top && right) return HTTOPRIGHT;
-            if (bottom && left) return HTBOTTOMLEFT;
-            if (bottom && right) return HTBOTTOMRIGHT;
-            if (left) return HTLEFT;
-            if (right) return HTRIGHT;
-            if (top) return HTTOP;
-            if (bottom) return HTBOTTOM;
-
-            // Top 30px = draggable title bar area
-            if (pt.y < 30) return HTCAPTION;
-        }
-        break;
-    }
     case WM_CHAR: {
         if (!hasSurface || wParam < 0x20) return 0;
         // Handle UTF-16 surrogate pairs (emoji etc.)
@@ -402,29 +365,10 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     case WM_ERASEBKGND:
         return 1; // Skip background erase to prevent flicker
     case WM_PAINT: {
-        // Validate the region without drawing - OpenGL renderer handles all drawing
+        // Validate the region without drawing - renderer handles all drawing
         ValidateRect(hwnd, nullptr);
         return 0;
     }
-    case WM_GETMINMAXINFO: {
-        if (sess) {
-            auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-            if (sess->minWidth > 0) mmi->ptMinTrackSize.x = sess->minWidth;
-            if (sess->minHeight > 0) mmi->ptMinTrackSize.y = sess->minHeight;
-            if (sess->maxWidth > 0) mmi->ptMaxTrackSize.x = sess->maxWidth;
-            if (sess->maxHeight > 0) mmi->ptMaxTrackSize.y = sess->maxHeight;
-        }
-        return 0;
-    }
-    case WM_CLOSE:
-        // Clean up this session and quit the app when no sessions remain.
-        // (Phase 1 only ever creates one session, so this still terminates the app.)
-        if (sess) {
-            bridge.destroySession(sess);
-        }
-        bridge.shutdown();
-        PostQuitMessage(0);
-        return 0;
     case WM_SIZE: {
         UINT width = LOWORD(lParam);
         UINT height = HIWORD(lParam);
@@ -498,21 +442,6 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             double delta = (double)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
             ghostty_input_scroll_mods_t mods = GHOSTTY_MODS_NONE;
             ghostty_surface_mouse_scroll(sess->surface, 0, delta, mods);
-        }
-        return 0;
-    }
-    case WM_DPICHANGED: {
-        if (hasSurface) {
-            UINT dpi = HIWORD(wParam);
-            double scale = (double)dpi / 96.0;
-            ghostty_surface_set_content_scale(sess->surface, scale, scale);
-            // Resize window to suggested rect
-            RECT* suggested = (RECT*)lParam;
-            SetWindowPos(hwnd, nullptr,
-                suggested->left, suggested->top,
-                suggested->right - suggested->left,
-                suggested->bottom - suggested->top,
-                SWP_NOZORDER | SWP_NOACTIVATE);
         }
         return 0;
     }
@@ -592,6 +521,118 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+    }
+
+    auto* sess = reinterpret_cast<TerminalSession*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    auto& bridge = GhosttyBridge::instance();
+
+    switch (msg) {
+    case WM_NCCALCSIZE:
+        if (sess && !sess->decorations && wParam == TRUE) {
+            // Extend client area to cover the entire window (no frame)
+            return 0;
+        }
+        break;
+    case WM_NCHITTEST:
+        // Allow drag and resize when window decorations are hidden
+        if (sess && !sess->decorations) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            const int border = 6;
+            bool left = pt.x < border;
+            bool right = pt.x >= rc.right - border;
+            bool top = pt.y < border;
+            bool bottom = pt.y >= rc.bottom - border;
+            if (top && left) return HTTOPLEFT;
+            if (top && right) return HTTOPRIGHT;
+            if (bottom && left) return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+            if (pt.y < 30) return HTCAPTION;
+        }
+        break;
+
+    case WM_GETMINMAXINFO:
+        if (sess) {
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+            if (sess->minWidth > 0) mmi->ptMinTrackSize.x = sess->minWidth;
+            if (sess->minHeight > 0) mmi->ptMinTrackSize.y = sess->minHeight;
+            if (sess->maxWidth > 0) mmi->ptMaxTrackSize.x = sess->maxWidth;
+            if (sess->maxHeight > 0) mmi->ptMaxTrackSize.y = sess->maxHeight;
+        }
+        return 0;
+
+    case WM_SIZE: {
+        // Resize the rendering child to fill our client area.
+        // The child's WM_SIZE handler notifies the renderer + ghostty surface.
+        if (sess && sess->hwnd) {
+            UINT width = LOWORD(lParam);
+            UINT height = HIWORD(lParam);
+            SetWindowPos(sess->hwnd, nullptr, 0, 0, width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
+
+    case WM_SETFOCUS:
+        // Forward focus to the rendering child so it receives keyboard input.
+        if (sess && sess->hwnd) SetFocus(sess->hwnd);
+        return 0;
+
+    case WM_DPICHANGED:
+        if (sess && sess->surface) {
+            UINT dpi = HIWORD(wParam);
+            double scale = (double)dpi / 96.0;
+            ghostty_surface_set_content_scale(sess->surface, scale, scale);
+            RECT* suggested = (RECT*)lParam;
+            SetWindowPos(hwnd, nullptr,
+                suggested->left, suggested->top,
+                suggested->right - suggested->left,
+                suggested->bottom - suggested->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+
+    case WM_CLOSE:
+        // Phase 2-A: still single-session, so closing the main window quits the app.
+        if (sess) bridge.destroySession(sess);
+        bridge.shutdown();
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+HWND GhosttyBridge::createMainWindow(TerminalSession* session) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = mainWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"GhosttyMainWindow";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    return CreateWindowExW(
+        0, L"GhosttyMainWindow", L"Ghostty",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
+        nullptr, nullptr, GetModuleHandleW(nullptr), session);
+}
+
 HWND GhosttyBridge::createGLWindow(HWND parent, TerminalSession* session) {
     static bool registered = false;
     if (!registered) {
@@ -605,24 +646,13 @@ HWND GhosttyBridge::createGLWindow(HWND parent, TerminalSession* session) {
         registered = true;
     }
 
-    HWND hwnd;
-    if (parent) {
-        // Child window mode
-        RECT rc;
-        GetClientRect(parent, &rc);
-        hwnd = CreateWindowExW(
-            0, L"GhosttyGLWindow", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-            0, 0, rc.right - rc.left, rc.bottom - rc.top,
-            parent, nullptr, GetModuleHandleW(nullptr), session);
-    } else {
-        // Standalone window mode (no WinUI parent)
-        hwnd = CreateWindowExW(
-            0, L"GhosttyGLWindow", L"Ghostty",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
-            nullptr, nullptr, GetModuleHandleW(nullptr), session);
-    }
+    RECT rc;
+    GetClientRect(parent, &rc);
+    HWND hwnd = CreateWindowExW(
+        0, L"GhosttyGLWindow", nullptr,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+        0, 0, rc.right - rc.left, rc.bottom - rc.top,
+        parent, nullptr, GetModuleHandleW(nullptr), session);
 
     if (hwnd) {
         char buf[128];
@@ -641,9 +671,22 @@ TerminalSession* GhosttyBridge::createSurface(HWND parentHwnd) {
     auto sessionOwned = std::make_unique<TerminalSession>();
     TerminalSession* session = sessionOwned.get();
 
-    // Create the Win32 window — session pointer is plumbed through WM_NCCREATE
+    // If no parent was supplied, host the rendering child inside our own
+    // top-level main window (Phase 2-A: always one main window per session).
+    if (!parentHwnd) {
+        session->parentHwnd = createMainWindow(session);
+        if (!session->parentHwnd) return nullptr;
+        parentHwnd = session->parentHwnd;
+    } else {
+        session->parentHwnd = parentHwnd;
+    }
+
+    // Create the rendering child — session pointer is plumbed through WM_NCCREATE
     session->hwnd = createGLWindow(parentHwnd, session);
-    if (!session->hwnd) return nullptr;
+    if (!session->hwnd) {
+        if (session->parentHwnd) DestroyWindow(session->parentHwnd);
+        return nullptr;
+    }
 
     // Run on 4MB stack thread with renderer context
     struct Args {
@@ -719,10 +762,14 @@ void GhosttyBridge::destroySession(TerminalSession* session) {
         session->surface = nullptr;
     }
     shutdownOpenGL(session);
-    // Window destruction is the caller's responsibility (typically driven by WM_CLOSE).
-    // Clear the userdata so any pending messages on this hwnd see no session.
+    // Clear userdata so pending messages on these hwnds see no session.
+    // Window destruction is driven by WM_CLOSE on the parent — we don't
+    // DestroyWindow here, we just detach.
     if (session->hwnd) {
         SetWindowLongPtrW(session->hwnd, GWLP_USERDATA, 0);
+    }
+    if (session->parentHwnd) {
+        SetWindowLongPtrW(session->parentHwnd, GWLP_USERDATA, 0);
     }
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
         if (it->get() == session) {
@@ -754,7 +801,9 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
     if (target.tag == GHOSTTY_TARGET_SURFACE) {
         sess = sessionFromSurface(target.target.surface);
     }
-    HWND hwnd = sess ? sess->hwnd : nullptr;
+    // Window-level actions (title, fullscreen, decorations, color, ...) target
+    // the top-level main window. The rendering child does not own a frame.
+    HWND hwnd = sess ? sess->parentHwnd : nullptr;
 
     switch (action.tag) {
     case GHOSTTY_ACTION_SET_TITLE:
@@ -946,9 +995,9 @@ bool GhosttyBridge::onReadClipboard(void* userdata, ghostty_clipboard_e clipboar
     // Phase 3 will need to track the focused session.
     if (!self || self->m_sessions.empty()) return false;
     TerminalSession* sess = self->m_sessions.front().get();
-    if (!sess->surface || !sess->hwnd) return false;
+    if (!sess->surface || !sess->parentHwnd) return false;
 
-    if (!OpenClipboard(sess->hwnd)) return false;
+    if (!OpenClipboard(sess->parentHwnd)) return false;
 
     HANDLE hData = GetClipboardData(CF_UNICODETEXT);
     if (!hData) {
@@ -983,7 +1032,7 @@ void GhosttyBridge::onWriteClipboard(void* userdata, ghostty_clipboard_e clipboa
     auto* self = static_cast<GhosttyBridge*>(userdata);
     // TODO(tabs): same caveat as onReadClipboard — Phase 1 uses the front session's hwnd.
     if (!self || self->m_sessions.empty() || count == 0 || !content) return;
-    HWND hwnd = self->m_sessions.front()->hwnd;
+    HWND hwnd = self->m_sessions.front()->parentHwnd;
     if (!hwnd) return;
 
     // Find text content
