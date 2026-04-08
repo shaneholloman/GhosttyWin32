@@ -3,9 +3,32 @@
 #include <Windows.h>
 #include <GL/gl.h>
 #include <cstdint>
+#include <vector>
+#include <memory>
 
 // Bridge between libghostty and Win32
 // Equivalent to the Swift AppDelegate on macOS
+
+// Per-surface state. One instance per terminal tab/window.
+// Stored in HWND GWLP_USERDATA and in ghostty_surface userdata for fast lookup.
+struct TerminalSession {
+    ghostty_surface_t surface = nullptr;
+    HWND hwnd = nullptr;
+
+    // OpenGL renderer state (unused in DirectX mode)
+    HDC hdc = nullptr;
+    HGLRC hglrc = nullptr;
+
+    // Window state for fullscreen/decorations toggle
+    bool fullscreen = false;
+    bool decorations = true;
+    RECT savedRect = {};
+    DWORD savedStyle = 0;
+
+    // Size limits from ghostty config
+    uint32_t minWidth = 0, minHeight = 0;
+    uint32_t maxWidth = 0, maxHeight = 0;
+};
 
 class GhosttyBridge {
 public:
@@ -21,12 +44,13 @@ public:
     ghostty_config_t config() const { return m_config; }
     bool isInitialized() const { return m_initialized; }
 
-    // Surface creation/destruction
-    // Creates a Win32 child window inside parentHwnd for OpenGL rendering
-    ghostty_surface_t createSurface(HWND parentHwnd);
-    void destroySurface(ghostty_surface_t surface);
-    HWND glWindow() const { return m_glWindow; }
-    void setDecorations(bool enabled) { m_decorations = enabled; }
+    // Creates a new TerminalSession with its own child window and ghostty surface.
+    // If parentHwnd is null, creates a top-level window.
+    // Returned pointer is owned by GhosttyBridge.
+    TerminalSession* createSurface(HWND parentHwnd);
+    void destroySession(TerminalSession* session);
+
+    const std::vector<std::unique_ptr<TerminalSession>>& sessions() const { return m_sessions; }
 
 private:
     GhosttyBridge() = default;
@@ -42,29 +66,20 @@ private:
     static void onWriteClipboard(void* userdata, ghostty_clipboard_e clipboard, const ghostty_clipboard_content_s* content, size_t count, bool confirm);
     static void onCloseSurface(void* userdata, bool process_exited);
 
-    // Win32 child window for OpenGL rendering
+    // Win32 child window for OpenGL/DirectX rendering
     static LRESULT CALLBACK glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    HWND createGLWindow(HWND parent);
+    HWND createGLWindow(HWND parent, TerminalSession* session);
 
-    // OpenGL context for WGL
-    bool initOpenGL(HWND hwnd);
-    void shutdownOpenGL();
+    // OpenGL context for WGL (per-session)
+    static bool initOpenGL(TerminalSession* session);
+    static void shutdownOpenGL(TerminalSession* session);
+
+    // Look up the session associated with a ghostty_surface_t (via surface userdata).
+    static TerminalSession* sessionFromSurface(ghostty_surface_t surface);
 
     ghostty_app_t m_app = nullptr;
     ghostty_config_t m_config = nullptr;
-    ghostty_surface_t m_surface = nullptr;
-    HWND m_glWindow = nullptr;
-    HDC m_hdc = nullptr;
-    HGLRC m_hglrc = nullptr;
-    bool m_vsync = false;
     bool m_initialized = false;
 
-    // Window state for fullscreen/decorations toggle
-    bool m_fullscreen = false;
-    bool m_decorations = true;
-    RECT m_savedRect = {};        // Window rect before fullscreen
-    DWORD m_savedStyle = 0;       // Window style before fullscreen
-    uint32_t m_minWidth = 0, m_minHeight = 0;
-    uint32_t m_maxWidth = 0, m_maxHeight = 0;
-
+    std::vector<std::unique_ptr<TerminalSession>> m_sessions;
 };

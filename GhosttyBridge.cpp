@@ -135,18 +135,27 @@ bool GhosttyBridge::initialize() {
 }
 
 void GhosttyBridge::shutdown() {
+    // Free all sessions before tearing down the app
+    for (auto& sess : m_sessions) {
+        if (sess->surface) {
+            ghostty_surface_free(sess->surface);
+            sess->surface = nullptr;
+        }
+        shutdownOpenGL(sess.get());
+    }
+    m_sessions.clear();
+
     if (m_app) {
         ghostty_app_free(m_app);
         m_app = nullptr;
     }
-    shutdownOpenGL();
     m_config = nullptr;
     m_initialized = false;
 }
 
-bool GhosttyBridge::initOpenGL(HWND hwnd) {
-    m_hdc = GetDC(hwnd);
-    if (!m_hdc) {
+bool GhosttyBridge::initOpenGL(TerminalSession* session) {
+    session->hdc = GetDC(session->hwnd);
+    if (!session->hdc) {
         DBG_LOG("ghostty: GetDC failed\n");
         return false;
     }
@@ -161,24 +170,24 @@ bool GhosttyBridge::initOpenGL(HWND hwnd) {
     pfd.cDepthBits = 24;
     pfd.cStencilBits = 8;
 
-    int pixelFormat = ChoosePixelFormat(m_hdc, &pfd);
+    int pixelFormat = ChoosePixelFormat(session->hdc, &pfd);
     if (pixelFormat == 0) {
         DBG_LOG("ghostty: ChoosePixelFormat failed\n");
         return false;
     }
 
-    if (!SetPixelFormat(m_hdc, pixelFormat, &pfd)) {
+    if (!SetPixelFormat(session->hdc, pixelFormat, &pfd)) {
         DBG_LOG("ghostty: SetPixelFormat failed\n");
         return false;
     }
 
-    m_hglrc = wglCreateContext(m_hdc);
-    if (!m_hglrc) {
+    session->hglrc = wglCreateContext(session->hdc);
+    if (!session->hglrc) {
         DBG_LOG("ghostty: wglCreateContext failed\n");
         return false;
     }
 
-    if (!wglMakeCurrent(m_hdc, m_hglrc)) {
+    if (!wglMakeCurrent(session->hdc, session->hglrc)) {
         DBG_LOG("ghostty: wglMakeCurrent failed\n");
         return false;
     }
@@ -190,7 +199,7 @@ bool GhosttyBridge::initOpenGL(HWND hwnd) {
     auto wglSwapIntervalEXT = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
     if (wglSwapIntervalEXT) {
         wglSwapIntervalEXT(0); // V-Sync OFF for low latency
-        DBG_LOG(m_vsync ? "ghostty: V-Sync ON\n" : "ghostty: V-Sync OFF\n");
+        DBG_LOG("ghostty: V-Sync OFF\n");
     }
 
     const char* version = (const char*)glGetString(GL_VERSION);
@@ -203,23 +212,38 @@ bool GhosttyBridge::initOpenGL(HWND hwnd) {
     return true;
 }
 
-void GhosttyBridge::shutdownOpenGL() {
-    if (m_hglrc) {
+void GhosttyBridge::shutdownOpenGL(TerminalSession* session) {
+    if (session->hglrc) {
         wglMakeCurrent(nullptr, nullptr);
-        wglDeleteContext(m_hglrc);
-        m_hglrc = nullptr;
+        wglDeleteContext(session->hglrc);
+        session->hglrc = nullptr;
     }
     // HDC is released when window is destroyed
-    m_hdc = nullptr;
+    session->hdc = nullptr;
+}
+
+TerminalSession* GhosttyBridge::sessionFromSurface(ghostty_surface_t surface) {
+    if (!surface) return nullptr;
+    return static_cast<TerminalSession*>(ghostty_surface_userdata(surface));
 }
 
 LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // Stash the TerminalSession* passed via CreateWindowEx lpParam
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+    }
+
+    auto* sess = reinterpret_cast<TerminalSession*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     auto& bridge = GhosttyBridge::instance();
+
+    // Helper that's true only when this window has a fully-initialized session
+    const bool hasSurface = sess && sess->surface;
 
     switch (msg) {
     case WM_NCCALCSIZE: {
         // When decorations are hidden, extend client area to cover the entire window
-        if (!bridge.m_decorations && wParam == TRUE) {
+        if (sess && !sess->decorations && wParam == TRUE) {
             // Return 0 to make client area = window area (no frame)
             return 0;
         }
@@ -227,7 +251,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     }
     case WM_NCHITTEST: {
         // Allow drag and resize when window decorations are hidden
-        if (!bridge.m_decorations) {
+        if (sess && !sess->decorations) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -255,7 +279,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         break;
     }
     case WM_CHAR: {
-        if (!bridge.m_surface || wParam < 0x20) return 0;
+        if (!hasSurface || wParam < 0x20) return 0;
         // Handle UTF-16 surrogate pairs (emoji etc.)
         static wchar_t highSurrogate = 0;
         if (IS_HIGH_SURROGATE(wParam)) {
@@ -276,15 +300,15 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         char utf8[8] = {};
         int len = WideCharToMultiByte(CP_UTF8, 0, utf16, utf16Len, utf8, sizeof(utf8), nullptr, nullptr);
         if (len > 0) {
-            ghostty_surface_text(bridge.m_surface, utf8, len);
+            ghostty_surface_text(sess->surface, utf8, len);
             if (bridge.m_app) ghostty_app_tick(bridge.m_app);
-            ghostty_surface_refresh(bridge.m_surface);
+            ghostty_surface_refresh(sess->surface);
         }
         return 0;
     }
     case WM_KEYDOWN:
     case WM_KEYUP: {
-        if (!bridge.m_surface) break;
+        if (!hasSurface) break;
 
         // Only handle keys that don't generate WM_CHAR
         bool isSpecialKey = false;
@@ -303,14 +327,14 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         }
         // Ctrl+C = copy selection or send SIGINT
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'C' && msg == WM_KEYDOWN) {
-            if (bridge.m_surface && ghostty_surface_has_selection(bridge.m_surface)) {
+            if (ghostty_surface_has_selection(sess->surface)) {
                 ghostty_text_s text = {};
-                if (ghostty_surface_read_selection(bridge.m_surface, &text) && text.text && text.text_len > 0) {
+                if (ghostty_surface_read_selection(sess->surface, &text) && text.text && text.text_len > 0) {
                     copyToClipboard(hwnd, text.text, text.text_len);
                 }
                 // Clear selection
-                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
-                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
 
                 return 0;
             }
@@ -318,7 +342,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         }
         // Ctrl+V = paste from clipboard directly
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'V' && msg == WM_KEYDOWN) {
-            if (bridge.m_surface && bridge.m_glWindow && OpenClipboard(bridge.m_glWindow)) {
+            if (OpenClipboard(hwnd)) {
                 HANDLE hData = GetClipboardData(CF_UNICODETEXT);
                 if (hData) {
                     wchar_t* wText = static_cast<wchar_t*>(GlobalLock(hData));
@@ -327,7 +351,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                         if (utf8Len > 0) {
                             std::vector<char> utf8(utf8Len);
                             WideCharToMultiByte(CP_UTF8, 0, wText, -1, utf8.data(), utf8Len, nullptr, nullptr);
-                            ghostty_surface_text(bridge.m_surface, utf8.data(), utf8Len - 1);
+                            ghostty_surface_text(sess->surface, utf8.data(), utf8Len - 1);
                         }
                         GlobalUnlock(hData);
                     }
@@ -360,7 +384,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         if (GetKeyState(VK_CONTROL) & 0x8000) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_CTRL);
         if (GetKeyState(VK_MENU) & 0x8000) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_ALT);
 
-        ghostty_surface_key(bridge.m_surface, keyEvent);
+        ghostty_surface_key(sess->surface, keyEvent);
 
         // When modifier keys change, re-send mouse position so ghostty
         // can update link detection (e.g. Ctrl+hover to highlight URLs)
@@ -369,7 +393,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             wParam == VK_MENU || wParam == VK_LMENU || wParam == VK_RMENU) {
             POINT pt;
             if (GetCursorPos(&pt) && ScreenToClient(hwnd, &pt)) {
-                ghostty_surface_mouse_pos(bridge.m_surface, (double)pt.x, (double)pt.y, keyEvent.mods);
+                ghostty_surface_mouse_pos(sess->surface, (double)pt.x, (double)pt.y, keyEvent.mods);
             }
         }
 
@@ -383,18 +407,20 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         return 0;
     }
     case WM_GETMINMAXINFO: {
-        auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        if (bridge.m_minWidth > 0) mmi->ptMinTrackSize.x = bridge.m_minWidth;
-        if (bridge.m_minHeight > 0) mmi->ptMinTrackSize.y = bridge.m_minHeight;
-        if (bridge.m_maxWidth > 0) mmi->ptMaxTrackSize.x = bridge.m_maxWidth;
-        if (bridge.m_maxHeight > 0) mmi->ptMaxTrackSize.y = bridge.m_maxHeight;
+        if (sess) {
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+            if (sess->minWidth > 0) mmi->ptMinTrackSize.x = sess->minWidth;
+            if (sess->minHeight > 0) mmi->ptMinTrackSize.y = sess->minHeight;
+            if (sess->maxWidth > 0) mmi->ptMaxTrackSize.x = sess->maxWidth;
+            if (sess->maxHeight > 0) mmi->ptMaxTrackSize.y = sess->maxHeight;
+        }
         return 0;
     }
     case WM_CLOSE:
-        // Clean up ghostty before destroying the window
-        if (bridge.m_surface) {
-            ghostty_surface_free(bridge.m_surface);
-            bridge.m_surface = nullptr;
+        // Clean up this session and quit the app when no sessions remain.
+        // (Phase 1 only ever creates one session, so this still terminates the app.)
+        if (sess) {
+            bridge.destroySession(sess);
         }
         bridge.shutdown();
         PostQuitMessage(0);
@@ -405,81 +431,81 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         if (width > 0 && height > 0) {
             // Notify DirectX renderer of new size (thread-safe atomic write)
             dx_notify_resize(width, height);
-            if (bridge.m_surface) {
-                ghostty_surface_set_size(bridge.m_surface, width, height);
-                ghostty_surface_refresh(bridge.m_surface);
+            if (hasSurface) {
+                ghostty_surface_set_size(sess->surface, width, height);
+                ghostty_surface_refresh(sess->surface);
             }
         }
         return 0;
     }
     case WM_MOUSEMOVE: {
-        if (bridge.m_surface) {
+        if (hasSurface) {
             double x = (double)GET_X_LPARAM(lParam);
             double y = (double)GET_Y_LPARAM(lParam);
             ghostty_input_mods_e mods = GHOSTTY_MODS_NONE;
             if (wParam & MK_SHIFT) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_SHIFT);
             if (wParam & MK_CONTROL) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_CTRL);
-            ghostty_surface_mouse_pos(bridge.m_surface, x, y, mods);
+            ghostty_surface_mouse_pos(sess->surface, x, y, mods);
         }
         return 0;
     }
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP: {
-        if (bridge.m_surface) {
+        if (hasSurface) {
             auto state = (msg == WM_LBUTTONDOWN) ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE;
             ghostty_input_mods_e mods = GHOSTTY_MODS_NONE;
             if (wParam & MK_SHIFT) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_SHIFT);
             if (wParam & MK_CONTROL) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_CTRL);
-            ghostty_surface_mouse_button(bridge.m_surface, state, GHOSTTY_MOUSE_LEFT, mods);
+            ghostty_surface_mouse_button(sess->surface, state, GHOSTTY_MOUSE_LEFT, mods);
             if (msg == WM_LBUTTONDOWN) SetCapture(hwnd);
             else ReleaseCapture();
         }
         return 0;
     }
     case WM_RBUTTONDOWN: {
-        if (bridge.m_surface) {
-            if (ghostty_surface_has_selection(bridge.m_surface)) {
+        if (hasSurface) {
+            if (ghostty_surface_has_selection(sess->surface)) {
                 ghostty_text_s text = {};
-                if (ghostty_surface_read_selection(bridge.m_surface, &text) && text.text && text.text_len > 0) {
+                if (ghostty_surface_read_selection(sess->surface, &text) && text.text && text.text_len > 0) {
                     copyToClipboard(hwnd, text.text, text.text_len);
                 }
                 // Clear selection
-                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
-                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE);
 
             } else {
-                ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
             }
         }
         return 0;
     }
     case WM_RBUTTONUP: {
-        if (bridge.m_surface) {
-            ghostty_surface_mouse_button(bridge.m_surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
+        if (hasSurface) {
+            ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, GHOSTTY_MODS_NONE);
         }
         return 0;
     }
     case WM_MBUTTONDOWN:
     case WM_MBUTTONUP: {
-        if (bridge.m_surface) {
+        if (hasSurface) {
             auto state = (msg == WM_MBUTTONDOWN) ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE;
-            ghostty_surface_mouse_button(bridge.m_surface, state, GHOSTTY_MOUSE_MIDDLE, GHOSTTY_MODS_NONE);
+            ghostty_surface_mouse_button(sess->surface, state, GHOSTTY_MOUSE_MIDDLE, GHOSTTY_MODS_NONE);
         }
         return 0;
     }
     case WM_MOUSEWHEEL: {
-        if (bridge.m_surface) {
+        if (hasSurface) {
             double delta = (double)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
             ghostty_input_scroll_mods_t mods = GHOSTTY_MODS_NONE;
-            ghostty_surface_mouse_scroll(bridge.m_surface, 0, delta, mods);
+            ghostty_surface_mouse_scroll(sess->surface, 0, delta, mods);
         }
         return 0;
     }
     case WM_DPICHANGED: {
-        if (bridge.m_surface) {
+        if (hasSurface) {
             UINT dpi = HIWORD(wParam);
             double scale = (double)dpi / 96.0;
-            ghostty_surface_set_content_scale(bridge.m_surface, scale, scale);
+            ghostty_surface_set_content_scale(sess->surface, scale, scale);
             // Resize window to suggested rect
             RECT* suggested = (RECT*)lParam;
             SetWindowPos(hwnd, nullptr,
@@ -492,9 +518,9 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     }
     case WM_IME_STARTCOMPOSITION: {
         // Position the IME candidate window near the cursor
-        if (bridge.m_surface) {
+        if (hasSurface) {
             double x = 0, y = 0, w = 0, h = 0;
-            ghostty_surface_ime_point(bridge.m_surface, &x, &y, &w, &h);
+            ghostty_surface_ime_point(sess->surface, &x, &y, &w, &h);
             HIMC hImc = ImmGetContext(hwnd);
             if (hImc) {
                 // Position the composition window
@@ -516,7 +542,7 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         break;
     }
     case WM_IME_COMPOSITION: {
-        if (bridge.m_surface && (lParam & GCS_COMPSTR)) {
+        if (hasSurface && (lParam & GCS_COMPSTR)) {
             HIMC hImc = ImmGetContext(hwnd);
             if (hImc) {
                 int len = ImmGetCompositionStringW(hImc, GCS_COMPSTR, nullptr, 0);
@@ -528,11 +554,11 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                     if (utf8Len > 0) {
                         std::vector<char> utf8(utf8Len);
                         WideCharToMultiByte(CP_UTF8, 0, comp.data(), -1, utf8.data(), utf8Len, nullptr, nullptr);
-                        ghostty_surface_preedit(bridge.m_surface, utf8.data(), utf8Len - 1);
+                        ghostty_surface_preedit(sess->surface, utf8.data(), utf8Len - 1);
                     }
                 } else {
                     // Empty composition = cleared
-                    ghostty_surface_preedit(bridge.m_surface, nullptr, 0);
+                    ghostty_surface_preedit(sess->surface, nullptr, 0);
                 }
                 ImmReleaseContext(hwnd, hImc);
             }
@@ -547,17 +573,17 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         break;
     }
     case WM_IME_ENDCOMPOSITION:
-        if (bridge.m_surface) {
-            ghostty_surface_preedit(bridge.m_surface, nullptr, 0);
+        if (hasSurface) {
+            ghostty_surface_preedit(sess->surface, nullptr, 0);
         }
         break;
     case WM_SETFOCUS:
-        if (bridge.m_surface) ghostty_surface_set_focus(bridge.m_surface, true);
+        if (hasSurface) ghostty_surface_set_focus(sess->surface, true);
         return 0;
     case WM_KILLFOCUS:
-        if (bridge.m_surface) ghostty_surface_set_focus(bridge.m_surface, false);
+        if (hasSurface) ghostty_surface_set_focus(sess->surface, false);
         return 0;
-case WM_USER + 1:
+    case WM_USER + 1:
         // Wakeup from ghostty - process pending events on main thread
         if (bridge.m_app) ghostty_app_tick(bridge.m_app);
         return 0;
@@ -566,7 +592,7 @@ case WM_USER + 1:
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-HWND GhosttyBridge::createGLWindow(HWND parent) {
+HWND GhosttyBridge::createGLWindow(HWND parent, TerminalSession* session) {
     static bool registered = false;
     if (!registered) {
         WNDCLASSW wc = {};
@@ -588,14 +614,14 @@ HWND GhosttyBridge::createGLWindow(HWND parent) {
             0, L"GhosttyGLWindow", nullptr,
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
             0, 0, rc.right - rc.left, rc.bottom - rc.top,
-            parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+            parent, nullptr, GetModuleHandleW(nullptr), session);
     } else {
         // Standalone window mode (no WinUI parent)
         hwnd = CreateWindowExW(
             0, L"GhosttyGLWindow", L"Ghostty",
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
-            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            nullptr, nullptr, GetModuleHandleW(nullptr), session);
     }
 
     if (hwnd) {
@@ -609,25 +635,28 @@ HWND GhosttyBridge::createGLWindow(HWND parent) {
     return hwnd;
 }
 
-ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
+TerminalSession* GhosttyBridge::createSurface(HWND parentHwnd) {
     if (!m_initialized || !m_app) return nullptr;
 
-    // Create a Win32 child window for OpenGL (WinUI overwrites GDI on main window)
-    m_glWindow = createGLWindow(parentHwnd);
-    if (!m_glWindow) return nullptr;
+    auto sessionOwned = std::make_unique<TerminalSession>();
+    TerminalSession* session = sessionOwned.get();
 
-    // Run on 4MB stack thread with OpenGL context
+    // Create the Win32 window — session pointer is plumbed through WM_NCCREATE
+    session->hwnd = createGLWindow(parentHwnd, session);
+    if (!session->hwnd) return nullptr;
+
+    // Run on 4MB stack thread with renderer context
     struct Args {
         GhosttyBridge* self;
-        HWND hwnd;
-        ghostty_surface_t result;
+        TerminalSession* session;
     };
-    Args args = { this, m_glWindow, nullptr };
+    Args args = { this, session };
 
     HANDLE hThread = CreateThread(
         nullptr, 4 * 1024 * 1024,
         [](LPVOID param) -> DWORD {
             auto* a = static_cast<Args*>(param);
+            TerminalSession* sess = a->session;
 
             // Default to DirectX, use GHOSTTY_RENDERER=opengl to override
             char rendererBuf[32] = {};
@@ -641,7 +670,7 @@ ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
 
             if (!useDirectX) {
                 // Create and activate OpenGL context on this thread
-                if (!a->self->initOpenGL(a->hwnd)) {
+                if (!initOpenGL(sess)) {
                     DBG_LOG("ghostty: OpenGL init failed\n");
                     return 1;
                 }
@@ -649,14 +678,17 @@ ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
 
             ghostty_surface_config_s surfConfig = ghostty_surface_config_new();
             surfConfig.platform_tag = GHOSTTY_PLATFORM_WINDOWS;
-            surfConfig.platform.windows.hwnd = a->hwnd;
-            surfConfig.platform.windows.hdc = useDirectX ? nullptr : a->self->m_hdc;
-            surfConfig.platform.windows.hglrc = useDirectX ? nullptr : a->self->m_hglrc;
+            surfConfig.platform.windows.hwnd = sess->hwnd;
+            surfConfig.platform.windows.hdc = useDirectX ? nullptr : sess->hdc;
+            surfConfig.platform.windows.hglrc = useDirectX ? nullptr : sess->hglrc;
+            // Stored on the surface so onAction can recover the session via
+            // ghostty_surface_userdata(target.surface).
+            surfConfig.userdata = sess;
             // Get DPI scale factor
-            UINT dpi = GetDpiForWindow(a->self->m_glWindow);
+            UINT dpi = GetDpiForWindow(sess->hwnd);
             surfConfig.scale_factor = (double)dpi / 96.0;
 
-            a->result = ghostty_surface_new(a->self->m_app, &surfConfig);
+            sess->surface = ghostty_surface_new(a->self->m_app, &surfConfig);
 
             // Release GL context BEFORE thread exits so renderer thread can acquire it
             if (!useDirectX) wglMakeCurrent(nullptr, nullptr);
@@ -669,47 +701,69 @@ ghostty_surface_t GhosttyBridge::createSurface(HWND parentHwnd) {
         CloseHandle(hThread);
     }
 
-    // Note: GL context remains on worker thread after it exits
-    // It will need to be made current again for rendering
-
-    if (args.result) {
-        DBG_LOG("ghostty: surface created!\n");
-        m_surface = args.result;
-
-    } else {
+    if (!session->surface) {
         DBG_LOG("ghostty: surface creation failed\n");
+        DestroyWindow(session->hwnd);
+        return nullptr;
     }
-    return args.result;
+
+    DBG_LOG("ghostty: surface created!\n");
+    m_sessions.push_back(std::move(sessionOwned));
+    return session;
 }
 
-void GhosttyBridge::destroySurface(ghostty_surface_t surface) {
-    if (surface) {
-        ghostty_surface_free(surface);
-        DBG_LOG("ghostty: surface destroyed\n");
+void GhosttyBridge::destroySession(TerminalSession* session) {
+    if (!session) return;
+    if (session->surface) {
+        ghostty_surface_free(session->surface);
+        session->surface = nullptr;
     }
+    shutdownOpenGL(session);
+    // Window destruction is the caller's responsibility (typically driven by WM_CLOSE).
+    // Clear the userdata so any pending messages on this hwnd see no session.
+    if (session->hwnd) {
+        SetWindowLongPtrW(session->hwnd, GWLP_USERDATA, 0);
+    }
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+        if (it->get() == session) {
+            m_sessions.erase(it);
+            break;
+        }
+    }
+    DBG_LOG("ghostty: session destroyed\n");
 }
 
 // --- Stub callbacks (TODO: implement properly) ---
 
 void GhosttyBridge::onWakeup(void* userdata) {
     auto* self = static_cast<GhosttyBridge*>(userdata);
-    // Post to main thread - onWakeup may be called from any thread
-    if (self && self->m_glWindow) {
-        PostMessageW(self->m_glWindow, WM_USER + 1, 0, 0);
+    if (!self) return;
+    // Post to main thread - onWakeup may be called from any thread.
+    // Any session's hwnd works since WM_USER+1 just dispatches ghostty_app_tick.
+    if (!self->m_sessions.empty()) {
+        PostMessageW(self->m_sessions.front()->hwnd, WM_USER + 1, 0, 0);
     }
 }
 
 bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty_action_s action) {
     auto& bridge = GhosttyBridge::instance();
 
+    // Resolve the target session for surface-targeted actions.
+    // App-targeted actions (NEW_WINDOW etc.) leave session=nullptr.
+    TerminalSession* sess = nullptr;
+    if (target.tag == GHOSTTY_TARGET_SURFACE) {
+        sess = sessionFromSurface(target.target.surface);
+    }
+    HWND hwnd = sess ? sess->hwnd : nullptr;
+
     switch (action.tag) {
     case GHOSTTY_ACTION_SET_TITLE:
-        if (action.action.set_title.title && bridge.m_glWindow) {
+        if (action.action.set_title.title && hwnd) {
             int wlen = MultiByteToWideChar(CP_UTF8, 0, action.action.set_title.title, -1, nullptr, 0);
             if (wlen > 0) {
                 std::vector<wchar_t> wTitle(wlen);
                 MultiByteToWideChar(CP_UTF8, 0, action.action.set_title.title, -1, wTitle.data(), wlen);
-                SetWindowTextW(bridge.m_glWindow, wTitle.data());
+                SetWindowTextW(hwnd, wTitle.data());
             }
         }
         return true;
@@ -765,82 +819,84 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         return true;
 
     case GHOSTTY_ACTION_RING_BELL:
-        if (bridge.m_glWindow)
-            FlashWindow(bridge.m_glWindow, TRUE);
+        if (hwnd)
+            FlashWindow(hwnd, TRUE);
         MessageBeep(MB_OK);
         return true;
 
     case GHOSTTY_ACTION_QUIT:
-        if (bridge.m_glWindow)
-            PostMessageW(bridge.m_glWindow, WM_CLOSE, 0, 0);
+        if (hwnd)
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
         return true;
 
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN: {
-        if (!bridge.m_glWindow) return true;
-        bridge.m_fullscreen = !bridge.m_fullscreen;
-        if (bridge.m_fullscreen) {
+        if (!sess || !hwnd) return true;
+        sess->fullscreen = !sess->fullscreen;
+        if (sess->fullscreen) {
             // Save current state
-            bridge.m_savedStyle = GetWindowLongW(bridge.m_glWindow, GWL_STYLE);
-            GetWindowRect(bridge.m_glWindow, &bridge.m_savedRect);
+            sess->savedStyle = GetWindowLongW(hwnd, GWL_STYLE);
+            GetWindowRect(hwnd, &sess->savedRect);
             // Go fullscreen
-            SetWindowLongW(bridge.m_glWindow, GWL_STYLE, bridge.m_savedStyle & ~(WS_OVERLAPPEDWINDOW));
+            SetWindowLongW(hwnd, GWL_STYLE, sess->savedStyle & ~(WS_OVERLAPPEDWINDOW));
             MONITORINFO mi = { sizeof(mi) };
-            GetMonitorInfoW(MonitorFromWindow(bridge.m_glWindow, MONITOR_DEFAULTTONEAREST), &mi);
-            SetWindowPos(bridge.m_glWindow, HWND_TOP,
+            GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+            SetWindowPos(hwnd, HWND_TOP,
                 mi.rcMonitor.left, mi.rcMonitor.top,
                 mi.rcMonitor.right - mi.rcMonitor.left,
                 mi.rcMonitor.bottom - mi.rcMonitor.top,
                 SWP_FRAMECHANGED);
         } else {
             // Restore
-            SetWindowLongW(bridge.m_glWindow, GWL_STYLE, bridge.m_savedStyle);
-            SetWindowPos(bridge.m_glWindow, nullptr,
-                bridge.m_savedRect.left, bridge.m_savedRect.top,
-                bridge.m_savedRect.right - bridge.m_savedRect.left,
-                bridge.m_savedRect.bottom - bridge.m_savedRect.top,
+            SetWindowLongW(hwnd, GWL_STYLE, sess->savedStyle);
+            SetWindowPos(hwnd, nullptr,
+                sess->savedRect.left, sess->savedRect.top,
+                sess->savedRect.right - sess->savedRect.left,
+                sess->savedRect.bottom - sess->savedRect.top,
                 SWP_FRAMECHANGED | SWP_NOZORDER);
         }
         return true;
     }
 
     case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
-        if (bridge.m_glWindow) {
-            if (IsZoomed(bridge.m_glWindow))
-                ShowWindow(bridge.m_glWindow, SW_RESTORE);
+        if (hwnd) {
+            if (IsZoomed(hwnd))
+                ShowWindow(hwnd, SW_RESTORE);
             else
-                ShowWindow(bridge.m_glWindow, SW_MAXIMIZE);
+                ShowWindow(hwnd, SW_MAXIMIZE);
         }
         return true;
 
     case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
-        if (bridge.m_glWindow) {
-            bridge.m_decorations = !bridge.m_decorations;
-            DWORD style = GetWindowLongW(bridge.m_glWindow, GWL_STYLE);
-            if (bridge.m_decorations)
+        if (sess && hwnd) {
+            sess->decorations = !sess->decorations;
+            DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+            if (sess->decorations)
                 style |= WS_OVERLAPPEDWINDOW;
             else
                 style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-            SetWindowLongW(bridge.m_glWindow, GWL_STYLE, style);
-            SetWindowPos(bridge.m_glWindow, nullptr, 0, 0, 0, 0,
+            SetWindowLongW(hwnd, GWL_STYLE, style);
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         }
         return true;
 
     case GHOSTTY_ACTION_SIZE_LIMIT: {
-        bridge.m_minWidth = action.action.size_limit.min_width;
-        bridge.m_minHeight = action.action.size_limit.min_height;
-        bridge.m_maxWidth = action.action.size_limit.max_width;
-        bridge.m_maxHeight = action.action.size_limit.max_height;
-        char buf[128];
-        sprintf_s(buf, "ghostty: SIZE_LIMIT min=%ux%u max=%ux%u\n",
-            bridge.m_minWidth, bridge.m_minHeight, bridge.m_maxWidth, bridge.m_maxHeight);
-        OutputDebugStringA(buf);
+        if (sess) {
+            sess->minWidth = action.action.size_limit.min_width;
+            sess->minHeight = action.action.size_limit.min_height;
+            sess->maxWidth = action.action.size_limit.max_width;
+            sess->maxHeight = action.action.size_limit.max_height;
+            char buf[128];
+            sprintf_s(buf, "ghostty: SIZE_LIMIT min=%ux%u max=%ux%u\n",
+                sess->minWidth, sess->minHeight, sess->maxWidth, sess->maxHeight);
+            OutputDebugStringA(buf);
+        }
         return true;
     }
 
     case GHOSTTY_ACTION_INITIAL_SIZE:
-        if (bridge.m_glWindow && action.action.initial_size.width > 0 && action.action.initial_size.height > 0) {
-            SetWindowPos(bridge.m_glWindow, nullptr, 0, 0,
+        if (hwnd && action.action.initial_size.width > 0 && action.action.initial_size.height > 0) {
+            SetWindowPos(hwnd, nullptr, 0, 0,
                 action.action.initial_size.width,
                 action.action.initial_size.height,
                 SWP_NOMOVE | SWP_NOZORDER);
@@ -848,23 +904,23 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         return true;
 
     case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
-        if (bridge.m_glWindow) {
-            SetWindowPos(bridge.m_glWindow, nullptr, 0, 0, 960, 640,
+        if (hwnd) {
+            SetWindowPos(hwnd, nullptr, 0, 0, 960, 640,
                 SWP_NOMOVE | SWP_NOZORDER);
         }
         return true;
 
     case GHOSTTY_ACTION_COLOR_CHANGE: {
         auto& cc = action.action.color_change;
-        if (cc.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND && bridge.m_glWindow) {
+        if (cc.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND && hwnd) {
             // Set title bar color to match terminal background (Windows 10/11)
             COLORREF color = RGB(cc.r, cc.g, cc.b);
-            DwmSetWindowAttribute(bridge.m_glWindow, DWMWA_CAPTION_COLOR, &color, sizeof(color));
+            DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &color, sizeof(color));
 
             // Also set title bar text color: light text on dark bg, dark text on light bg
             float luminance = 0.299f * cc.r + 0.587f * cc.g + 0.114f * cc.b;
             COLORREF textColor = (luminance < 128) ? RGB(255, 255, 255) : RGB(0, 0, 0);
-            DwmSetWindowAttribute(bridge.m_glWindow, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
+            DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
         }
         return true;
     }
@@ -874,7 +930,7 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
             // Simple notification via balloon tooltip or message box
             // TODO: use proper Windows toast notifications
             MessageBeep(MB_ICONINFORMATION);
-            FlashWindow(bridge.m_glWindow, TRUE);
+            if (hwnd) FlashWindow(hwnd, TRUE);
         }
         return true;
 
@@ -885,9 +941,14 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
 
 bool GhosttyBridge::onReadClipboard(void* userdata, ghostty_clipboard_e clipboard, void* state) {
     auto* self = static_cast<GhosttyBridge*>(userdata);
-    if (!self || !self->m_surface || !self->m_glWindow) return false;
+    // TODO(tabs): the runtime callback doesn't expose which surface requested
+    // the read. For Phase 1 (single session) we always use the front session;
+    // Phase 3 will need to track the focused session.
+    if (!self || self->m_sessions.empty()) return false;
+    TerminalSession* sess = self->m_sessions.front().get();
+    if (!sess->surface || !sess->hwnd) return false;
 
-    if (!OpenClipboard(self->m_glWindow)) return false;
+    if (!OpenClipboard(sess->hwnd)) return false;
 
     HANDLE hData = GetClipboardData(CF_UNICODETEXT);
     if (!hData) {
@@ -906,7 +967,7 @@ bool GhosttyBridge::onReadClipboard(void* userdata, ghostty_clipboard_e clipboar
     if (utf8Len > 0) {
         std::vector<char> utf8(utf8Len);
         WideCharToMultiByte(CP_UTF8, 0, wText, -1, utf8.data(), utf8Len, nullptr, nullptr);
-        ghostty_surface_complete_clipboard_request(self->m_surface, utf8.data(), state, false);
+        ghostty_surface_complete_clipboard_request(sess->surface, utf8.data(), state, false);
     }
 
     GlobalUnlock(hData);
@@ -920,7 +981,10 @@ void GhosttyBridge::onConfirmReadClipboard(void* userdata, const char* content, 
 
 void GhosttyBridge::onWriteClipboard(void* userdata, ghostty_clipboard_e clipboard, const ghostty_clipboard_content_s* content, size_t count, bool confirm) {
     auto* self = static_cast<GhosttyBridge*>(userdata);
-    if (!self || !self->m_glWindow || count == 0 || !content) return;
+    // TODO(tabs): same caveat as onReadClipboard — Phase 1 uses the front session's hwnd.
+    if (!self || self->m_sessions.empty() || count == 0 || !content) return;
+    HWND hwnd = self->m_sessions.front()->hwnd;
+    if (!hwnd) return;
 
     // Find text content
     const char* text = nullptr;
@@ -933,7 +997,7 @@ void GhosttyBridge::onWriteClipboard(void* userdata, ghostty_clipboard_e clipboa
     if (!text || !text[0]) return;
 
     int wlen = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
-    if (wlen <= 0 || !OpenClipboard(self->m_glWindow)) return;
+    if (wlen <= 0 || !OpenClipboard(hwnd)) return;
 
     EmptyClipboard();
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (wlen + 1) * sizeof(wchar_t));

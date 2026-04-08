@@ -29,10 +29,10 @@ int APIENTRY wWinMain(
     }
 
     // Create surface (standalone Win32 window)
-    bridge.createSurface(nullptr);
+    TerminalSession* session = bridge.createSurface(nullptr);
 
     // Apply config-driven window settings
-    if (HWND hwnd = bridge.glWindow()) {
+    if (HWND hwnd = session ? session->hwnd : nullptr) {
         // window-decoration
         const char* decorVal = nullptr;
         if (ghostty_config_get(bridge.config(), &decorVal, "window-decoration", 17) && decorVal) {
@@ -40,7 +40,7 @@ int APIENTRY wWinMain(
                 DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
                 // Keep WS_THICKFRAME for smooth DWM resize, hide caption visually
                 style = (style & ~(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_THICKFRAME;
-                bridge.setDecorations(false);
+                session->decorations = false;
                 SetWindowLongW(hwnd, GWL_STYLE, style);
                 SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
