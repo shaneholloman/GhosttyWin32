@@ -13,3 +13,7 @@
 #include <malloc.h>
 #include <memory.h>
 #include <tchar.h>
+
+// C++/WinRT — base projection. WinUI 2 / XAML Islands projections will be
+// added in subsequent steps.
+#include <winrt/Windows.Foundation.h>
