@@ -30,11 +30,10 @@ struct TerminalSession {
     RECT savedRect = {};
     DWORD savedStyle = 0;
 
-    // Reserved area at the top of the main window for tabs / drag region.
-    // Zero when the native caption is visible (decorations=true); set to 32px
-    // when decorations=false so the user still has somewhere to drag the
-    // window from. Step 2-D will host XAML controls in this area.
-    int headerHeight = 0;
+    // Reserved area at the top of the main window for the XAML tab bar (which
+    // also serves as the drag region, since there is no native caption). Zero
+    // when window-decoration=false to give the chromeless terminal-only look.
+    int headerHeight = 32;
 
     // Size limits from ghostty config (enforced on parentHwnd via WM_GETMINMAXINFO)
     uint32_t minWidth = 0, minHeight = 0;

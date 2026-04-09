@@ -53,32 +53,29 @@ int APIENTRY wWinMain(
     // Create surface (standalone Win32 window)
     TerminalSession* session = bridge.createSurface(nullptr);
 
-    // Apply config-driven window settings to the top-level main window
+    // Apply config-driven window settings to the top-level main window.
+    // The main window is always created without a native caption — the XAML
+    // tab bar in the header strip replaces it. window-decoration only controls
+    // whether that header strip is shown:
+    //   - true  (default) → 32px header (tab bar visible, drag region present)
+    //   - false           → no header   (chromeless terminal-only look)
     if (HWND hwnd = session ? session->parentHwnd : nullptr) {
-        // window-decoration
         const char* decorVal = nullptr;
         if (ghostty_config_get(bridge.config(), &decorVal, "window-decoration", 17) && decorVal) {
             if (strcmp(decorVal, "false") == 0 || strcmp(decorVal, "none") == 0) {
-                DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
-                // Keep WS_THICKFRAME for smooth DWM resize, hide caption visually
-                style = (style & ~(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_THICKFRAME;
                 session->decorations = false;
-                // Reserve a 32px header at the top so the user can drag the
-                // window even though the native caption is hidden. The drag
-                // region is delivered via WM_NCHITTEST → HTCAPTION.
-                session->headerHeight = 32;
-                SetWindowLongW(hwnd, GWL_STYLE, style);
-                SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                session->headerHeight = 0;
+                // Re-fire WM_SIZE so the rendering child reclaims the header area.
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED,
+                    MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top));
             }
         }
 
         // Windows 11 rounded corners
         INT cornerPref = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &cornerPref, sizeof(cornerPref));
-
-        // background-opacity is handled by ghostty's renderer internally.
-        // No Win32-level transparency needed (DWM compositing is expensive).
     }
 
     // Move focus to the rendering child so keyboard/IME input works on first

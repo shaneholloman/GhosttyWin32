@@ -532,36 +532,36 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
 
     switch (msg) {
     case WM_NCCALCSIZE:
-        if (sess && !sess->decorations && wParam == TRUE) {
-            // Extend client area to cover the entire window (no frame)
-            return 0;
-        }
+        // The window has WS_THICKFRAME but no WS_CAPTION. By default Windows
+        // would still leave a thin resize border in the NC area; we extend the
+        // client area to cover the entire window so our XAML header reaches
+        // the top edge. Resize edges are handled manually via WM_NCHITTEST.
+        if (wParam == TRUE) return 0;
         break;
-    case WM_NCHITTEST:
-        // Allow drag and resize when window decorations are hidden.
-        // The header area (headerHeight px at top) acts as the drag region
-        // since there's no native title bar.
-        if (sess && !sess->decorations) {
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            ScreenToClient(hwnd, &pt);
-            const int border = 6;
-            bool left = pt.x < border;
-            bool right = pt.x >= rc.right - border;
-            bool top = pt.y < border;
-            bool bottom = pt.y >= rc.bottom - border;
-            if (top && left) return HTTOPLEFT;
-            if (top && right) return HTTOPRIGHT;
-            if (bottom && left) return HTBOTTOMLEFT;
-            if (bottom && right) return HTBOTTOMRIGHT;
-            if (left) return HTLEFT;
-            if (right) return HTRIGHT;
-            if (top) return HTTOP;
-            if (bottom) return HTBOTTOM;
-            if (pt.y < sess->headerHeight) return HTCAPTION;
-        }
-        break;
+    case WM_NCHITTEST: {
+        // Manual hit-testing: resize edges first (6px border), then the header
+        // strip is the drag region (HTCAPTION), then everything else is client.
+        if (!sess) break;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &pt);
+        const int border = 6;
+        bool left = pt.x < border;
+        bool right = pt.x >= rc.right - border;
+        bool top = pt.y < border;
+        bool bottom = pt.y >= rc.bottom - border;
+        if (top && left) return HTTOPLEFT;
+        if (top && right) return HTTOPRIGHT;
+        if (bottom && left) return HTBOTTOMLEFT;
+        if (bottom && right) return HTBOTTOMRIGHT;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+        if (top) return HTTOP;
+        if (bottom) return HTBOTTOM;
+        if (pt.y < sess->headerHeight) return HTCAPTION;
+        return HTCLIENT;
+    }
 
     case WM_GETMINMAXINFO:
         if (sess) {
@@ -631,9 +631,13 @@ HWND GhosttyBridge::createMainWindow(TerminalSession* session) {
         registered = true;
     }
 
+    // No native caption — the XAML tab bar in the header area replaces it.
+    // Keep WS_THICKFRAME for resize, WS_SYSMENU/MIN/MAX for taskbar interaction.
+    const DWORD style = WS_OVERLAPPED | WS_THICKFRAME | WS_SYSMENU
+                      | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE;
     return CreateWindowExW(
         0, L"GhosttyMainWindow", L"Ghostty",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        style,
         CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
         nullptr, nullptr, GetModuleHandleW(nullptr), session);
 }
@@ -682,6 +686,11 @@ TerminalSession* GhosttyBridge::createSurface(HWND parentHwnd) {
     if (!parentHwnd) {
         session->parentHwnd = createMainWindow(session);
         if (!session->parentHwnd) return nullptr;
+        // Force the NC area recalculation so our WM_NCCALCSIZE (which extends
+        // the client area to cover the entire window) takes effect immediately.
+        // Without this, the first frame can flash a native caption remnant.
+        SetWindowPos(session->parentHwnd, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         parentHwnd = session->parentHwnd;
     } else {
         session->parentHwnd = parentHwnd;
@@ -922,21 +931,11 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         return true;
 
     case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
+        // The native caption is always absent — toggling decorations shows or
+        // hides the XAML header strip (and with it, tabs and the drag region).
         if (sess && hwnd) {
             sess->decorations = !sess->decorations;
-            DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
-            if (sess->decorations) {
-                style |= WS_OVERLAPPEDWINDOW;
-                sess->headerHeight = 0;
-            } else {
-                // Keep WS_THICKFRAME so the user can still resize from edges.
-                style = (style & ~(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_THICKFRAME;
-                sess->headerHeight = 32;
-            }
-            SetWindowLongW(hwnd, GWL_STYLE, style);
-            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-            // Force a relayout of the rendering child to honor the new header.
+            sess->headerHeight = sess->decorations ? 32 : 0;
             RECT rc;
             GetClientRect(hwnd, &rc);
             SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED,
