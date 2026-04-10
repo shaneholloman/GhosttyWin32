@@ -5,6 +5,37 @@
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml::Hosting;
 
+// Custom Application subclass that provides WinUI 2 metadata.
+// WindowsXamlManager needs an Application with IXamlMetadataProvider
+// so it can resolve WinUI 2 types (TabView etc.) at runtime.
+// The actual metadata provider (XamlControlsXamlMetaDataProvider) is
+// created lazily to avoid the circular dependency: the Application
+// must exist before the provider can be instantiated.
+struct GhosttyApp : winrt::Windows::UI::Xaml::ApplicationT<GhosttyApp,
+    winrt::Windows::UI::Xaml::Markup::IXamlMetadataProvider>
+{
+    winrt::Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider m_provider{ nullptr };
+
+    winrt::Windows::UI::Xaml::Markup::IXamlType GetXamlType(
+        winrt::Windows::UI::Xaml::Interop::TypeName const& type)
+    {
+        if (!m_provider) m_provider = winrt::Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider();
+        return m_provider.GetXamlType(type);
+    }
+
+    winrt::Windows::UI::Xaml::Markup::IXamlType GetXamlType(winrt::hstring const& fullName)
+    {
+        if (!m_provider) m_provider = winrt::Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider();
+        return m_provider.GetXamlType(fullName);
+    }
+
+    winrt::com_array<winrt::Windows::UI::Xaml::Markup::XmlnsDefinition> GetXmlnsDefinitions()
+    {
+        if (!m_provider) m_provider = winrt::Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider();
+        return m_provider.GetXmlnsDefinitions();
+    }
+};
+
 int APIENTRY wWinMain(
     _In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -26,14 +57,24 @@ int APIENTRY wWinMain(
     DesktopWindowXamlSource xamlSource{ nullptr }; // Must outlive the message loop
     bool xamlReady = false;
     try {
-        // No XamlApplication needed — built-in WinUI 2 controls (TabView etc.)
-        // register their own metadata. Just initialize the XAML framework.
+        OutputDebugStringA("ghostty: step 1 — creating custom App...\n");
+        auto app = winrt::make<GhosttyApp>();
+        OutputDebugStringA("ghostty: step 2 — App created, calling InitializeForCurrentThread...\n");
         xamlManager = WindowsXamlManager::InitializeForCurrentThread();
+        // Step 3: try merging WinUI 2 theme resources (optional — TabView
+        // may work unstyled even if this fails).
+        try {
+            auto muxResources = winrt::Microsoft::UI::Xaml::Controls::XamlControlsResources();
+            winrt::Windows::UI::Xaml::Application::Current().Resources().MergedDictionaries().Append(muxResources);
+            OutputDebugStringA("ghostty: step 3 — WinUI 2 resources merged\n");
+        } catch (...) {
+            OutputDebugStringA("ghostty: step 3 — WinUI 2 resources skipped (non-fatal)\n");
+        }
         xamlReady = true;
-        OutputDebugStringA("ghostty: WinUI 2 XAML hosting initialized\n");
+        OutputDebugStringA("ghostty: XAML initialized OK\n");
     } catch (winrt::hresult_error const& e) {
         char buf[256];
-        sprintf_s(buf, "ghostty: XAML init failed hr=0x%08x\n", (unsigned)e.code());
+        sprintf_s(buf, "ghostty: XAML init failed at hr=0x%08x\n", (unsigned)e.code());
         OutputDebugStringA(buf);
     }
 
@@ -116,16 +157,23 @@ int APIENTRY wWinMain(
                     rc.right - rc.left, session->headerHeight,
                     SWP_SHOWWINDOW);
 
-                // Placeholder: a dark panel matching the terminal background.
-                namespace xaml = winrt::Windows::UI::Xaml;
-                namespace controls = xaml::Controls;
-                namespace media = xaml::Media;
-                auto grid = controls::Grid();
-                grid.Background(media::SolidColorBrush(
-                    winrt::Windows::UI::ColorHelper::FromArgb(255, 30, 30, 30)));
-                grid.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
-                grid.VerticalAlignment(xaml::VerticalAlignment::Stretch);
-                xamlSource.Content(grid);
+                // Create TabView via XAML markup so the type is resolved
+                // through our IXamlMetadataProvider (GhosttyApp), not via
+                // direct RoGetActivationFactory (which fails for WinUI 2).
+                auto tabViewXaml = winrt::Windows::UI::Xaml::Markup::XamlReader::Load(
+                    LR"(<muxc:TabView
+                        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                        xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        IsAddTabButtonVisible="True"
+                        TabWidthMode="Equal">
+                        <muxc:TabView.TabItems>
+                            <muxc:TabViewItem Header="Terminal" IsClosable="False"/>
+                        </muxc:TabView.TabItems>
+                    </muxc:TabView>)");
+
+                xamlSource.Content(tabViewXaml.as<winrt::Windows::UI::Xaml::UIElement>());
 
                 OutputDebugStringA("ghostty: XAML Island attached to header\n");
             } catch (winrt::hresult_error const& e) {
