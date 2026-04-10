@@ -36,50 +36,10 @@ struct GhosttyApp : winrt::Windows::UI::Xaml::ApplicationT<GhosttyApp,
     }
 };
 
-// Subclass proc for the XAML Island's own HWND (child of xamlHostWnd).
-// Intercepts WM_NCHITTEST to check if the mouse is over interactive XAML
-// content. If not → HTTRANSPARENT so the parent can return HTCAPTION.
-#include <commctrl.h>
-#pragma comment(lib, "comctl32.lib")
-
-static winrt::Windows::UI::Xaml::Hosting::DesktopWindowXamlSource* g_xamlSourceForHitTest = nullptr;
-
-static LRESULT CALLBACK islandSubclassProc(
-    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-    UINT_PTR /*subclassId*/, DWORD_PTR /*refData*/)
-{
-    if (msg == WM_NCHITTEST && g_xamlSourceForHitTest && *g_xamlSourceForHitTest) {
-        auto content = g_xamlSourceForHitTest->Content();
-        if (content) {
-            POINT pt;
-            pt.x = (short)LOWORD(lParam);
-            pt.y = (short)HIWORD(lParam);
-            ScreenToClient(hwnd, &pt);
-            namespace xaml = winrt::Windows::UI::Xaml;
-            auto point = winrt::Windows::Foundation::Point(
-                static_cast<float>(pt.x), static_cast<float>(pt.y));
-            auto elements = xaml::Media::VisualTreeHelper::FindElementsInHostCoordinates(
-                point, content);
-            for (auto const& elem : elements) {
-                auto name = winrt::get_class_name(elem);
-                std::wstring_view sv{ name };
-                if (sv.find(L"Button") != std::wstring_view::npos ||
-                    sv.find(L"TabViewItem") != std::wstring_view::npos ||
-                    sv.find(L"ListViewItem") != std::wstring_view::npos) {
-                    return DefSubclassProc(hwnd, msg, wParam, lParam);
-                }
-            }
-            return HTTRANSPARENT;
-        }
-    }
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
-}
-
-static LRESULT CALLBACK xamlHostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_NCHITTEST) return HTTRANSPARENT;
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
+// Transparent drag bar overlay — sits ON TOP of the XAML Island in z-order.
+// Intercepts WM_NCHITTEST: if the mouse is over interactive XAML content
+// (tabs, buttons) → HTTRANSPARENT (pass to XAML below). If over empty
+// space → HTCAPTION (window drag). This is the Windows Terminal approach.
 int APIENTRY wWinMain(
     _In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -166,10 +126,11 @@ int APIENTRY wWinMain(
                 static bool xamlHostRegistered = false;
                 if (!xamlHostRegistered) {
                     WNDCLASSW wc = {};
-                    wc.lpfnWndProc = xamlHostWndProc;
+                    wc.lpfnWndProc = DefWindowProcW; // NOT HTTRANSPARENT — must be HTCLIENT for XAML passthrough
                     wc.hInstance = GetModuleHandleW(nullptr);
                     wc.lpszClassName = L"GhosttyXamlHost";
                     RegisterClassW(&wc);
+
                     xamlHostRegistered = true;
                 }
                 RECT rc;
@@ -190,11 +151,6 @@ int APIENTRY wWinMain(
                 winrt::check_hresult(interop->get_WindowHandle(&islandHwnd));
                 session->xamlIslandHwnd = islandHwnd;
 
-                // Subclass the island HWND so we can intercept WM_NCHITTEST
-                // and return HTTRANSPARENT for empty tab bar areas (drag).
-                g_xamlSourceForHitTest = &xamlSource;
-                SetWindowSubclass(islandHwnd, islandSubclassProc, 0, 0);
-
                 // Fill the host window.
                 SetWindowPos(islandHwnd, nullptr, 0, 0,
                     rc.right - rc.left, session->headerHeight,
@@ -213,13 +169,16 @@ int APIENTRY wWinMain(
                 root.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
                 root.VerticalAlignment(xaml::VerticalAlignment::Stretch);
 
-                // Two columns: TabView (star) + system buttons (auto)
+                // Three columns: TabView (auto) + drag area (star) + buttons (auto)
                 auto col1 = controls::ColumnDefinition();
-                col1.Width(xaml::GridLengthHelper::FromValueAndType(1, xaml::GridUnitType::Star));
+                col1.Width(xaml::GridLengthHelper::Auto());
                 root.ColumnDefinitions().Append(col1);
                 auto col2 = controls::ColumnDefinition();
-                col2.Width(xaml::GridLengthHelper::Auto());
+                col2.Width(xaml::GridLengthHelper::FromValueAndType(1, xaml::GridUnitType::Star));
                 root.ColumnDefinitions().Append(col2);
+                auto col3 = controls::ColumnDefinition();
+                col3.Width(xaml::GridLengthHelper::Auto());
+                root.ColumnDefinitions().Append(col3);
 
                 // TabView
                 auto tabView = muxc::TabView();
@@ -239,11 +198,48 @@ int APIENTRY wWinMain(
 
                 HWND mainWnd = session->parentHwnd;
 
+                // Drag area — fills the gap between tabs and system buttons.
+                // Has a background so it's hittable, PointerPressed starts drag.
+                auto dragArea = controls::Border();
+                dragArea.Background(media::SolidColorBrush(
+                    winrt::Windows::UI::ColorHelper::FromArgb(1, 30, 30, 30))); // nearly transparent but hittable
+                dragArea.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
+                dragArea.VerticalAlignment(xaml::VerticalAlignment::Stretch);
+                controls::Grid::SetColumn(dragArea, 1);
+                // Manual window drag via XAML pointer events.
+                struct DragState { POINT start; bool active = false; };
+                static DragState drag;
+                dragArea.PointerPressed([mainWnd](auto&& sender, xaml::Input::PointerRoutedEventArgs const& args) {
+                    GetCursorPos(&drag.start);
+                    drag.active = true;
+                    sender.as<xaml::UIElement>().CapturePointer(args.Pointer());
+                    args.Handled(true);
+                });
+                dragArea.PointerMoved([mainWnd](auto&&, xaml::Input::PointerRoutedEventArgs const& args) {
+                    if (!drag.active) return;
+                    POINT now;
+                    GetCursorPos(&now);
+                    RECT rc;
+                    GetWindowRect(mainWnd, &rc);
+                    SetWindowPos(mainWnd, nullptr,
+                        rc.left + (now.x - drag.start.x),
+                        rc.top + (now.y - drag.start.y),
+                        0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                    drag.start = now;
+                    args.Handled(true);
+                });
+                dragArea.PointerReleased([](auto&& sender, xaml::Input::PointerRoutedEventArgs const& args) {
+                    drag.active = false;
+                    sender.as<xaml::UIElement>().ReleasePointerCapture(args.Pointer());
+                    args.Handled(true);
+                });
+                root.Children().Append(dragArea);
+
                 // System buttons (─ □ ×)
                 auto sysButtons = controls::StackPanel();
                 sysButtons.Orientation(controls::Orientation::Horizontal);
                 sysButtons.VerticalAlignment(xaml::VerticalAlignment::Top);
-                controls::Grid::SetColumn(sysButtons, 1);
+                controls::Grid::SetColumn(sysButtons, 2);
 
                 auto makeBtn = [&](const wchar_t* text, double w) {
                     auto btn = controls::Button();
@@ -390,7 +386,16 @@ int APIENTRY wWinMain(
                     }
                 };
 
-                OutputDebugStringA("ghostty: XAML Island attached to header\n");
+                // Transparent drag bar overlay — sits on top of the XAML Island
+                // to intercept WM_NCHITTEST for window dragging.
+                HWND dragBarHwnd = CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP,
+                    L"GhosttyDragBar", nullptr,
+                    WS_CHILD | WS_VISIBLE,
+                    0, 0, rc.right - rc.left, session->headerHeight,
+                    hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+
+                OutputDebugStringA("ghostty: XAML Island + drag bar attached\n");
             } catch (winrt::hresult_error const& e) {
                 char buf[256];
                 sprintf_s(buf, "ghostty: XAML Island failed hr=0x%08x\n", (unsigned)e.code());

@@ -36,8 +36,7 @@ struct TerminalSession {
     int headerHeight = 40;
 
     // XAML Islands: a dedicated host child window and the island HWND inside it.
-    // Kept separate from the rendering child to avoid DXGI swap chain conflicts.
-    HWND xamlHostWnd = nullptr;   // our child of parentHwnd, hosts the island
+    HWND xamlHostWnd = nullptr;    // our child of parentHwnd, hosts the island
     HWND xamlIslandHwnd = nullptr; // child of xamlHostWnd, created by XAML
 
     // Size limits from ghostty config (enforced on parentHwnd via WM_GETMINMAXINFO)

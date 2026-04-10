@@ -570,11 +570,9 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         if (right) return HTRIGHT;
         if (top) return HTTOP;
         if (bottom) return HTBOTTOM;
-        // Header area: HTCAPTION for drag. Currently the XAML Island
-        // absorbs mouse events so drag only works outside the island.
-        // Proper tab-bar drag requires DwmExtendFrameIntoClientArea
-        // integration — tracked as a future improvement.
-        if (sess->headerHeight > 0 && pt.y < sess->headerHeight) return HTCAPTION;
+        // Header area: HTCLIENT so XAML can receive clicks when the
+        // drag bar overlay returns HTTRANSPARENT. The drag bar itself
+        // returns HTCAPTION for empty areas (handled by its WndProc).
         return HTCLIENT;
     }
 
@@ -595,7 +593,6 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         int top = sess->headerHeight;
         int childHeight = height - top;
         if (childHeight < 1) childHeight = 1;
-        // Resize the XAML host to fill the header area.
         if (sess->xamlHostWnd && top > 0) {
             SetWindowPos(sess->xamlHostWnd, nullptr, 0, 0, width, top,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
