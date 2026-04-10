@@ -161,18 +161,96 @@ int APIENTRY wWinMain(
                 tabView.IsAddTabButtonVisible(true);
                 tabView.TabWidthMode(muxc::TabViewWidthMode::Equal);
 
+                // First tab — associate with the initial session via Tag
                 auto tab1 = muxc::TabViewItem();
                 tab1.Header(winrt::box_value(L"Terminal"));
                 tab1.IsClosable(false);
+                tab1.Tag(winrt::box_value(reinterpret_cast<uint64_t>(session->hwnd)));
                 tabView.TabItems().Append(tab1);
                 tabView.SelectedItem(tab1);
 
                 xamlSource.Content(tabView);
 
-                // When the XAML Island gets focus (user clicked the tab bar),
-                // asynchronously return focus to the terminal. PostMessage
-                // lets the click be processed first, then focus moves back.
+                // --- Tab event handlers ---
                 HWND parentHwnd = session->parentHwnd;
+
+                // [+] button: create a new terminal session + tab
+                tabView.AddTabButtonClick(
+                    [parentHwnd, &bridge](muxc::TabView const& tv, auto&&) {
+                        auto* newSess = bridge.createSurface(parentHwnd);
+                        if (!newSess) return;
+                        // Hide all other session windows, show the new one
+                        for (auto& s : bridge.sessions()) {
+                            if (s.get() != newSess) ShowWindow(s->hwnd, SW_HIDE);
+                        }
+                        ShowWindow(newSess->hwnd, SW_SHOW);
+                        SetFocus(newSess->hwnd);
+                        // Add a new tab
+                        auto newTab = muxc::TabViewItem();
+                        newTab.Header(winrt::box_value(L"Terminal"));
+                        newTab.Tag(winrt::box_value(reinterpret_cast<uint64_t>(newSess->hwnd)));
+                        tv.TabItems().Append(newTab);
+                        tv.SelectedItem(newTab);
+                    });
+
+                // Tab selection changed: show/hide child windows
+                tabView.SelectionChanged(
+                    [parentHwnd, &bridge](auto&& sender, auto&&) {
+                        auto tv = sender.template as<muxc::TabView>();
+                        auto sel = tv.SelectedItem();
+                        if (!sel) return;
+                        auto selItem = sel.template as<muxc::TabViewItem>();
+                        uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
+                        HWND selHwnd = reinterpret_cast<HWND>(selTag);
+                        for (auto& s : bridge.sessions()) {
+                            ShowWindow(s->hwnd, (s->hwnd == selHwnd) ? SW_SHOW : SW_HIDE);
+                        }
+                        PostMessageW(parentHwnd, WM_APP, 0, 0);
+                    });
+
+                // Tab close requested: destroy the session
+                tabView.TabCloseRequested(
+                    [parentHwnd, &bridge](muxc::TabView const& tv,
+                                          muxc::TabViewTabCloseRequestedEventArgs const& args) {
+                        auto item = args.Tab();
+                        uint64_t tag = winrt::unbox_value<uint64_t>(item.Tag());
+                        HWND targetHwnd = reinterpret_cast<HWND>(tag);
+
+                        // Find and destroy the session
+                        for (auto& s : bridge.sessions()) {
+                            if (s->hwnd == targetHwnd) {
+                                bridge.destroySession(s.get());
+                                break;
+                            }
+                        }
+
+                        // Remove the tab
+                        uint32_t idx = 0;
+                        if (tv.TabItems().IndexOf(item, idx)) {
+                            tv.TabItems().RemoveAt(idx);
+                        }
+
+                        // If no tabs left, quit
+                        if (tv.TabItems().Size() == 0) {
+                            bridge.shutdown();
+                            PostQuitMessage(0);
+                            return;
+                        }
+
+                        // Show the newly selected tab's session
+                        if (auto sel = tv.SelectedItem()) {
+                            auto selItem = sel.as<muxc::TabViewItem>();
+                            uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
+                            HWND selHwnd = reinterpret_cast<HWND>(selTag);
+                            for (auto& s : bridge.sessions()) {
+                                ShowWindow(s->hwnd, (s->hwnd == selHwnd) ? SW_SHOW : SW_HIDE);
+                            }
+                            SetFocus(selHwnd);
+                        }
+                    });
+
+                // When the XAML Island gets focus (user clicked the tab bar),
+                // asynchronously return focus to the terminal.
                 xamlSource.GotFocus(
                     [parentHwnd](DesktopWindowXamlSource const&,
                                  winrt::Windows::UI::Xaml::Hosting::DesktopWindowXamlSourceGotFocusEventArgs const&) {

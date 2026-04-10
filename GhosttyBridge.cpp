@@ -634,8 +634,14 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         return 0;
 
     case WM_APP:
-        // Posted by XAML Island's GotFocus handler — return focus to terminal.
-        if (sess && sess->hwnd) SetFocus(sess->hwnd);
+        // Posted by XAML Island's GotFocus / SelectionChanged — return focus
+        // to whichever terminal session is currently visible.
+        for (auto& s : bridge.m_sessions) {
+            if (s->hwnd && IsWindowVisible(s->hwnd)) {
+                SetFocus(s->hwnd);
+                break;
+            }
+        }
         return 0;
 
     case WM_CLOSE:
