@@ -160,6 +160,7 @@ int APIENTRY wWinMain(
                 tabView.VerticalAlignment(xaml::VerticalAlignment::Stretch);
                 tabView.IsAddTabButtonVisible(true);
                 tabView.TabWidthMode(muxc::TabViewWidthMode::Equal);
+                tabView.RequestedTheme(xaml::ElementTheme::Dark);
 
                 // First tab — associate with the initial session via Tag
                 auto tab1 = muxc::TabViewItem();
