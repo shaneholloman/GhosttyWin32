@@ -257,6 +257,23 @@ int APIENTRY wWinMain(
                         PostMessageW(parentHwnd, WM_APP, 0, 0);
                     });
 
+                // Title sync: when ghostty sets a surface title, update the
+                // matching TabViewItem header.
+                static winrt::Microsoft::UI::Xaml::Controls::TabView s_tabView{ nullptr };
+                s_tabView = tabView;
+                GhosttyBridge::s_titleChangedFn = [](void*, HWND sessHwnd, const wchar_t* title) {
+                    if (!s_tabView) return;
+                    namespace muxc = winrt::Microsoft::UI::Xaml::Controls;
+                    for (uint32_t i = 0; i < s_tabView.TabItems().Size(); i++) {
+                        auto item = s_tabView.TabItems().GetAt(i).as<muxc::TabViewItem>();
+                        uint64_t tag = winrt::unbox_value<uint64_t>(item.Tag());
+                        if (reinterpret_cast<HWND>(tag) == sessHwnd) {
+                            item.Header(winrt::box_value(title));
+                            break;
+                        }
+                    }
+                };
+
                 OutputDebugStringA("ghostty: XAML Island attached to header\n");
             } catch (winrt::hresult_error const& e) {
                 char buf[256];

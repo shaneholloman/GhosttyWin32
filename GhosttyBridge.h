@@ -96,6 +96,13 @@ private:
     // Look up the session associated with a ghostty_surface_t (via surface userdata).
     static TerminalSession* sessionFromSurface(ghostty_surface_t surface);
 
+public:
+    // Callback for tab title updates (set by wWinMain, called from onAction).
+    // sessionHwnd identifies which tab to update.
+    using TitleChangedFn = void(*)(void* ctx, HWND sessionHwnd, const wchar_t* title);
+    static TitleChangedFn s_titleChangedFn;
+    static void* s_titleChangedCtx;
+
     ghostty_app_t m_app = nullptr;
     ghostty_config_t m_config = nullptr;
     bool m_initialized = false;

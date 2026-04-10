@@ -21,6 +21,9 @@
 // DirectX renderer: notify resize from main thread (exported from ghostty.dll)
 extern "C" void dx_notify_resize(uint32_t w, uint32_t h);
 
+GhosttyBridge::TitleChangedFn GhosttyBridge::s_titleChangedFn = nullptr;
+void* GhosttyBridge::s_titleChangedCtx = nullptr;
+
 // Helper: copy UTF-8 text to Windows clipboard
 static bool copyToClipboard(HWND hwnd, const char* utf8, size_t utf8Len) {
     int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)utf8Len, nullptr, 0);
@@ -865,6 +868,11 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
                 std::vector<wchar_t> wTitle(wlen);
                 MultiByteToWideChar(CP_UTF8, 0, action.action.set_title.title, -1, wTitle.data(), wlen);
                 SetWindowTextW(hwnd, wTitle.data());
+                // Update the matching TabViewItem header
+                HWND sessHwnd = sess ? sess->hwnd : nullptr;
+                if (sessHwnd && s_titleChangedFn) {
+                    s_titleChangedFn(s_titleChangedCtx, sessHwnd, wTitle.data());
+                }
             }
         }
         return true;
