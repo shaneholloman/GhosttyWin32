@@ -580,10 +580,14 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         int top = sess->headerHeight;
         int childHeight = height - top;
         if (childHeight < 1) childHeight = 1;
-        // Resize the XAML Island to fill the header area.
-        if (sess->xamlIslandHwnd && top > 0) {
-            SetWindowPos(sess->xamlIslandHwnd, nullptr, 0, 0, width, top,
+        // Resize the XAML host and its island child to fill the header area.
+        if (sess->xamlHostWnd && top > 0) {
+            SetWindowPos(sess->xamlHostWnd, nullptr, 0, 0, width, top,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            if (sess->xamlIslandHwnd) {
+                SetWindowPos(sess->xamlIslandHwnd, nullptr, 0, 0, width, top,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
         }
         // Resize the rendering child below the header.
         if (sess->hwnd) {

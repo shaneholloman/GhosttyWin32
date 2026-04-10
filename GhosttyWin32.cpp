@@ -23,6 +23,7 @@ int APIENTRY wWinMain(
     // identity needed (unlike WinUI 3, see issue #18).
     winrt::init_apartment(winrt::apartment_type::single_threaded);
     WindowsXamlManager xamlManager{ nullptr };
+    DesktopWindowXamlSource xamlSource{ nullptr }; // Must outlive the message loop
     bool xamlReady = false;
     try {
         // No XamlApplication needed — built-in WinUI 2 controls (TabView etc.)
@@ -77,30 +78,54 @@ int APIENTRY wWinMain(
         DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &cornerPref, sizeof(cornerPref));
 
         // Host a XAML Island in the header area (will become TabView in Step 2-E).
+        // The island is attached to a dedicated host child window (not the main
+        // window directly) so its DirectComposition surface doesn't conflict
+        // with ghostty's D3D11 swap chain on the rendering child.
         if (session->headerHeight > 0 && xamlReady) {
             try {
-                auto xamlSource = DesktopWindowXamlSource();
+                // Create a thin child window solely for hosting the XAML Island.
+                static bool xamlHostRegistered = false;
+                if (!xamlHostRegistered) {
+                    WNDCLASSW wc = {};
+                    wc.lpfnWndProc = DefWindowProcW;
+                    wc.hInstance = GetModuleHandleW(nullptr);
+                    wc.lpszClassName = L"GhosttyXamlHost";
+                    RegisterClassW(&wc);
+                    xamlHostRegistered = true;
+                }
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HWND xamlHostWnd = CreateWindowExW(
+                    0, L"GhosttyXamlHost", nullptr,
+                    WS_CHILD | WS_VISIBLE,
+                    0, 0, rc.right - rc.left, session->headerHeight,
+                    hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+
+                session->xamlHostWnd = xamlHostWnd;
+
+                xamlSource = DesktopWindowXamlSource();
                 auto interop = xamlSource.as<IDesktopWindowXamlSourceNative>();
-                winrt::check_hresult(interop->AttachToWindow(hwnd));
+                winrt::check_hresult(interop->AttachToWindow(xamlHostWnd));
 
                 HWND islandHwnd = nullptr;
                 winrt::check_hresult(interop->get_WindowHandle(&islandHwnd));
                 session->xamlIslandHwnd = islandHwnd;
 
-                // Position the island in the header area.
-                RECT rc;
-                GetClientRect(hwnd, &rc);
+                // Fill the host window.
                 SetWindowPos(islandHwnd, nullptr, 0, 0,
                     rc.right - rc.left, session->headerHeight,
                     SWP_SHOWWINDOW);
 
-                // Placeholder: a dark border matching the terminal background.
-                namespace controls = winrt::Windows::UI::Xaml::Controls;
-                namespace media = winrt::Windows::UI::Xaml::Media;
-                auto border = controls::Border();
-                border.Background(media::SolidColorBrush(
+                // Placeholder: a dark panel matching the terminal background.
+                namespace xaml = winrt::Windows::UI::Xaml;
+                namespace controls = xaml::Controls;
+                namespace media = xaml::Media;
+                auto grid = controls::Grid();
+                grid.Background(media::SolidColorBrush(
                     winrt::Windows::UI::ColorHelper::FromArgb(255, 30, 30, 30)));
-                xamlSource.Content(border);
+                grid.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
+                grid.VerticalAlignment(xaml::VerticalAlignment::Stretch);
+                xamlSource.Content(grid);
 
                 OutputDebugStringA("ghostty: XAML Island attached to header\n");
             } catch (winrt::hresult_error const& e) {
