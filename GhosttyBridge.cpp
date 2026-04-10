@@ -509,9 +509,17 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     case WM_SETFOCUS:
         if (hasSurface) ghostty_surface_set_focus(sess->surface, true);
         return 0;
-    case WM_KILLFOCUS:
+    case WM_KILLFOCUS: {
         if (hasSurface) ghostty_surface_set_focus(sess->surface, false);
+        // If focus moved to the XAML Island (tab bar click), schedule a
+        // focus return. The PostMessage lets the click be processed first.
+        HWND newFocus = (HWND)wParam;
+        if (newFocus && sess && sess->parentHwnd &&
+            IsChild(sess->parentHwnd, newFocus) && newFocus != hwnd) {
+            PostMessageW(sess->parentHwnd, WM_APP, 0, 0);
+        }
         return 0;
+    }
     case WM_USER + 1:
         // Wakeup from ghostty - process pending events on main thread
         if (bridge.m_app) ghostty_app_tick(bridge.m_app);
@@ -602,6 +610,15 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         if (sess && sess->hwnd) SetFocus(sess->hwnd);
         return 0;
 
+    case WM_ACTIVATE:
+        // When the window is activated (clicked, alt-tabbed to), force focus
+        // to the Ghostty child. The XAML Island's internal windows tend to
+        // capture focus otherwise, preventing terminal keyboard input.
+        if (LOWORD(wParam) != WA_INACTIVE && sess && sess->hwnd) {
+            SetFocus(sess->hwnd);
+        }
+        return 0;
+
     case WM_DPICHANGED:
         if (sess && sess->surface) {
             UINT dpi = HIWORD(wParam);
@@ -614,6 +631,11 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 suggested->bottom - suggested->top,
                 SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        return 0;
+
+    case WM_APP:
+        // Posted by XAML Island's GotFocus handler — return focus to terminal.
+        if (sess && sess->hwnd) SetFocus(sess->hwnd);
         return 0;
 
     case WM_CLOSE:

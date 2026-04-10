@@ -169,6 +169,16 @@ int APIENTRY wWinMain(
 
                 xamlSource.Content(tabView);
 
+                // When the XAML Island gets focus (user clicked the tab bar),
+                // asynchronously return focus to the terminal. PostMessage
+                // lets the click be processed first, then focus moves back.
+                HWND parentHwnd = session->parentHwnd;
+                xamlSource.GotFocus(
+                    [parentHwnd](DesktopWindowXamlSource const&,
+                                 winrt::Windows::UI::Xaml::Hosting::DesktopWindowXamlSourceGotFocusEventArgs const&) {
+                        PostMessageW(parentHwnd, WM_APP, 0, 0);
+                    });
+
                 OutputDebugStringA("ghostty: XAML Island attached to header\n");
             } catch (winrt::hresult_error const& e) {
                 char buf[256];
