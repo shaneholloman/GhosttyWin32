@@ -316,10 +316,7 @@ int APIENTRY wWinMain(
                     [parentHwnd, &bridge](muxc::TabView const& tv, auto&&) {
                         auto* newSess = bridge.createSurface(parentHwnd);
                         if (!newSess) return;
-                        // Hide all other session windows, show the new one
-                        for (auto& s : bridge.sessions()) {
-                            if (s.get() != newSess) ShowWindow(s->hwnd, SW_HIDE);
-                        }
+                        // TODO: reduce flicker on new tab creation
                         ShowWindow(newSess->hwnd, SW_SHOW);
                         SetFocus(newSess->hwnd);
                         // Add a new tab
@@ -330,7 +327,7 @@ int APIENTRY wWinMain(
                         tv.SelectedItem(newTab);
                     });
 
-                // Tab selection changed: show/hide child windows
+                // Tab selection changed: bring selected surface to top
                 tabView.SelectionChanged(
                     [parentHwnd, &bridge](auto&& sender, auto&&) {
                         auto tv = sender.template as<muxc::TabView>();
@@ -339,10 +336,9 @@ int APIENTRY wWinMain(
                         auto selItem = sel.template as<muxc::TabViewItem>();
                         uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
                         HWND selHwnd = reinterpret_cast<HWND>(selTag);
-                        for (auto& s : bridge.sessions()) {
-                            ShowWindow(s->hwnd, (s->hwnd == selHwnd) ? SW_SHOW : SW_HIDE);
-                        }
-                        PostMessageW(parentHwnd, WM_APP, 0, 0);
+                        SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        SetFocus(selHwnd);
                     });
 
                 // Tab close requested: destroy the session
@@ -374,14 +370,13 @@ int APIENTRY wWinMain(
                             return;
                         }
 
-                        // Show the newly selected tab's session
+                        // Bring the newly selected tab's session to top
                         if (auto sel = tv.SelectedItem()) {
                             auto selItem = sel.as<muxc::TabViewItem>();
                             uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
                             HWND selHwnd = reinterpret_cast<HWND>(selTag);
-                            for (auto& s : bridge.sessions()) {
-                                ShowWindow(s->hwnd, (s->hwnd == selHwnd) ? SW_SHOW : SW_HIDE);
-                            }
+                            SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
                             SetFocus(selHwnd);
                         }
                     });
