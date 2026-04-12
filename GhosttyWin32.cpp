@@ -1,5 +1,6 @@
 #include "framework.h"
 #include <dwmapi.h>
+#include <windowsx.h>
 #include "GhosttyBridge.h"
 
 using namespace winrt;
@@ -126,7 +127,24 @@ int APIENTRY wWinMain(
                 static bool xamlHostRegistered = false;
                 if (!xamlHostRegistered) {
                     WNDCLASSW wc = {};
-                    wc.lpfnWndProc = DefWindowProcW; // NOT HTTRANSPARENT — must be HTCLIENT for XAML passthrough
+                    // Forward resize edge hits to the parent main window
+                    // so the user can grab the resize border over the XAML area.
+                    wc.lpfnWndProc = [](HWND h, UINT m, WPARAM w, LPARAM l) -> LRESULT {
+                        if (m == WM_NCHITTEST) {
+                            HWND parent = GetParent(h);
+                            if (parent) {
+                                POINT pt = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+                                RECT parentRc;
+                                GetWindowRect(parent, &parentRc);
+                                const int border = 6;
+                                if (pt.x - parentRc.left < border || parentRc.right - pt.x < border ||
+                                    pt.y - parentRc.top < border || parentRc.bottom - pt.y < border) {
+                                    return HTTRANSPARENT;
+                                }
+                            }
+                        }
+                        return DefWindowProcW(h, m, w, l);
+                    };
                     wc.hInstance = GetModuleHandleW(nullptr);
                     wc.lpszClassName = L"GhosttyXamlHost";
                     RegisterClassW(&wc);

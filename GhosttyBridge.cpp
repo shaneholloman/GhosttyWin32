@@ -246,6 +246,21 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     const bool hasSurface = sess && sess->surface;
 
     switch (msg) {
+    case WM_NCHITTEST: {
+        // Transparent at resize edges — let the parent handle resizing.
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        HWND parent = GetParent(hwnd);
+        if (parent) {
+            RECT parentRc;
+            GetWindowRect(parent, &parentRc);
+            const int border = 6;
+            if (pt.x - parentRc.left < border || parentRc.right - pt.x < border ||
+                pt.y - parentRc.top < border || parentRc.bottom - pt.y < border) {
+                return HTTRANSPARENT;
+            }
+        }
+        break;
+    }
     case WM_CHAR: {
         if (!hasSurface || wParam < 0x20) return 0;
         // Handle UTF-16 surrogate pairs (emoji etc.)
