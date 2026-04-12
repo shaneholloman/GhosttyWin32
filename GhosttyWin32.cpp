@@ -354,15 +354,7 @@ int APIENTRY wWinMain(
                         uint64_t tag = winrt::unbox_value<uint64_t>(item.Tag());
                         HWND targetHwnd = reinterpret_cast<HWND>(tag);
 
-                        // Find and destroy the session
-                        for (auto& s : bridge.sessions()) {
-                            if (s->hwnd == targetHwnd) {
-                                bridge.destroySession(s.get());
-                                break;
-                            }
-                        }
-
-                        // Remove the tab
+                        // Remove the tab from TabView first
                         uint32_t idx = 0;
                         if (tv.TabItems().IndexOf(item, idx)) {
                             tv.TabItems().RemoveAt(idx);
@@ -370,24 +362,33 @@ int APIENTRY wWinMain(
 
                         // If no tabs left, quit
                         if (tv.TabItems().Size() == 0) {
+                            bridge.destroySession(
+                                [&]() -> TerminalSession* {
+                                    for (auto& s : bridge.sessions())
+                                        if (s->hwnd == targetHwnd) return s.get();
+                                    return nullptr;
+                                }());
                             bridge.shutdown();
                             PostQuitMessage(0);
                             return;
                         }
 
-                        // Show selected, hide others, set focus
+                        // Switch to next tab FIRST (surface is already the right size)
                         if (auto sel = tv.SelectedItem()) {
                             auto selItem = sel.as<muxc::TabViewItem>();
                             uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
                             HWND selHwnd = reinterpret_cast<HWND>(selTag);
                             SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-                            for (auto& s : bridge.sessions()) {
-                                if (s->hwnd && s->hwnd != selHwnd) {
-                                    ShowWindow(s->hwnd, SW_HIDE);
-                                }
-                            }
                             SetFocus(selHwnd);
+                        }
+
+                        // NOW destroy the old session (new tab is already visible)
+                        for (auto& s : bridge.sessions()) {
+                            if (s->hwnd == targetHwnd) {
+                                bridge.destroySession(s.get());
+                                break;
+                            }
                         }
                     });
 
