@@ -169,28 +169,35 @@ int APIENTRY wWinMain(
                 root.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
                 root.VerticalAlignment(xaml::VerticalAlignment::Stretch);
 
-                // Three columns: TabView (auto) + drag area (star) + buttons (auto)
+                // Three columns: TabView (auto, max 70%) + drag area (star) + buttons (auto)
                 auto col1 = controls::ColumnDefinition();
                 col1.Width(xaml::GridLengthHelper::Auto());
                 root.ColumnDefinitions().Append(col1);
                 auto col2 = controls::ColumnDefinition();
                 col2.Width(xaml::GridLengthHelper::FromValueAndType(1, xaml::GridUnitType::Star));
+                col2.MinWidth(100); // Always keep at least 100px for dragging
                 root.ColumnDefinitions().Append(col2);
                 auto col3 = controls::ColumnDefinition();
                 col3.Width(xaml::GridLengthHelper::Auto());
                 root.ColumnDefinitions().Append(col3);
 
-                // TabView
+                // TabView — capped at 70% of window width so drag area is always reachable
                 auto tabView = muxc::TabView();
-                tabView.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
+                tabView.HorizontalAlignment(xaml::HorizontalAlignment::Left);
                 tabView.VerticalAlignment(xaml::VerticalAlignment::Stretch);
                 tabView.IsAddTabButtonVisible(true);
                 tabView.TabWidthMode(muxc::TabViewWidthMode::Equal);
+                tabView.MaxWidth(static_cast<double>(rc.right - rc.left) * 0.7);
                 controls::Grid::SetColumn(tabView, 0);
+
+                // Update MaxWidth when window resizes
+                root.SizeChanged([tabView](auto&&, xaml::SizeChangedEventArgs const& args) {
+                    tabView.MaxWidth(args.NewSize().Width * 0.7);
+                });
 
                 auto tab1 = muxc::TabViewItem();
                 tab1.Header(winrt::box_value(L"Terminal"));
-                tab1.IsClosable(false);
+                tab1.IsClosable(true);
                 tab1.Tag(winrt::box_value(reinterpret_cast<uint64_t>(session->hwnd)));
                 tabView.TabItems().Append(tab1);
                 tabView.SelectedItem(tab1);
@@ -385,15 +392,6 @@ int APIENTRY wWinMain(
                         }
                     }
                 };
-
-                // Transparent drag bar overlay — sits on top of the XAML Island
-                // to intercept WM_NCHITTEST for window dragging.
-                HWND dragBarHwnd = CreateWindowExW(
-                    WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP,
-                    L"GhosttyDragBar", nullptr,
-                    WS_CHILD | WS_VISIBLE,
-                    0, 0, rc.right - rc.left, session->headerHeight,
-                    hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
 
                 OutputDebugStringA("ghostty: XAML Island + drag bar attached\n");
             } catch (winrt::hresult_error const& e) {
