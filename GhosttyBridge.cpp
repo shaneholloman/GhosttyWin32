@@ -637,13 +637,13 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         int top = sess ? sess->headerHeight : TerminalSession::kDefaultHeaderHeight;
         int childHeight = height - top;
         if (childHeight < 1) childHeight = 1;
-        // Resize XAML host (stored on bridge, persists across tab closes)
+        // Resize XAML host + island
         if (bridge.m_xamlHostWnd && top > 0) {
             SetWindowPos(bridge.m_xamlHostWnd, nullptr, 0, 0, width, top,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                SWP_NOZORDER | SWP_NOACTIVATE);
             if (bridge.m_xamlIslandHwnd) {
                 SetWindowPos(bridge.m_xamlIslandHwnd, nullptr, 0, 0, width, top,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
         // Resize all rendering children (including hidden tabs)
@@ -653,6 +653,31 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
+        return 0;
+    }
+
+    case WM_PAINT: {
+        // Paint the client area with the title bar background color during resize.
+        // XAML Islands don't resize synchronously with the native window, so this
+        // hides the exposed gap with the expected color (same technique as Windows Terminal).
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        int top = sess ? sess->headerHeight : TerminalSession::kDefaultHeaderHeight;
+        // Title bar area: dark background matching the tab bar
+        if (ps.rcPaint.top < top) {
+            RECT rcHeader = ps.rcPaint;
+            rcHeader.bottom = min(rcHeader.bottom, (LONG)top);
+            FillRect(hdc, &rcHeader, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        }
+        // Terminal area: fill with the terminal background color
+        if (ps.rcPaint.bottom > top) {
+            RECT rcContent = ps.rcPaint;
+            rcContent.top = max(rcContent.top, (LONG)top);
+            HBRUSH bgBrush = CreateSolidBrush(bridge.m_bgColor);
+            FillRect(hdc, &rcContent, bgBrush);
+            DeleteObject(bgBrush);
+        }
+        EndPaint(hwnd, &ps);
         return 0;
     }
 
@@ -1102,6 +1127,7 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         if (cc.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND && hwnd) {
             // Set title bar color to match terminal background (Windows 10/11)
             COLORREF color = RGB(cc.r, cc.g, cc.b);
+            bridge.m_bgColor = color;
             DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &color, sizeof(color));
 
             // Also set title bar text color: light text on dark bg, dark text on light bg

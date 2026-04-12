@@ -116,5 +116,9 @@ public:
     HWND m_xamlHostWnd = nullptr;
     HWND m_xamlIslandHwnd = nullptr;
 
+    // Terminal background color — updated by COLOR_CHANGE action,
+    // used to fill exposed areas during resize.
+    COLORREF m_bgColor = RGB(30, 30, 30);
+
     std::vector<std::unique_ptr<TerminalSession>> m_sessions;
 };
