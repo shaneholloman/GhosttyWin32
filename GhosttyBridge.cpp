@@ -22,6 +22,8 @@
 extern "C" void dx_notify_resize(void* dev, uint32_t w, uint32_t h);
 // Get the DxDevice pointer from a ghostty surface (returns the per-surface device)
 extern "C" void* ghostty_surface_dx_device(void* surface);
+// DirectComposition visibility control (safe while renderer is active)
+extern "C" void dx_set_surface_visible(void* dev, bool visible);
 
 GhosttyBridge::TitleChangedFn GhosttyBridge::s_titleChangedFn = nullptr;
 void* GhosttyBridge::s_titleChangedCtx = nullptr;
@@ -751,7 +753,7 @@ HWND GhosttyBridge::createGLWindow(HWND parent, TerminalSession* session) {
     GetClientRect(parent, &rc);
     int top = session ? session->headerHeight : 0;
     HWND hwnd = CreateWindowExW(
-        0, L"GhosttyGLWindow", nullptr,
+        WS_EX_NOREDIRECTIONBITMAP, L"GhosttyGLWindow", nullptr,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
         0, top, rc.right - rc.left, (rc.bottom - rc.top) - top,
         parent, nullptr, GetModuleHandleW(nullptr), session);

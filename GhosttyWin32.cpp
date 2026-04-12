@@ -3,6 +3,9 @@
 #include <windowsx.h>
 #include "GhosttyBridge.h"
 
+extern "C" void dx_set_surface_visible(void* dev, bool visible);
+extern "C" void* ghostty_surface_dx_device(void* surface);
+
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml::Hosting;
 
@@ -327,7 +330,7 @@ int APIENTRY wWinMain(
                         tv.SelectedItem(newTab);
                     });
 
-                // Tab selection changed: show selected, hide others, set focus
+                // Tab selection changed: show/hide via DirectComposition + set focus
                 tabView.SelectionChanged(
                     [parentHwnd, &bridge](auto&& sender, auto&&) {
                         auto tv = sender.template as<muxc::TabView>();
@@ -336,13 +339,15 @@ int APIENTRY wWinMain(
                         auto selItem = sel.template as<muxc::TabViewItem>();
                         uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
                         HWND selHwnd = reinterpret_cast<HWND>(selTag);
-                        SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        // Show/hide via DirectComposition (safe while renderers are active)
                         for (auto& s : bridge.sessions()) {
-                            if (s->hwnd && s->hwnd != selHwnd) {
-                                ShowWindow(s->hwnd, SW_HIDE);
+                            if (s->hwnd && s->surface) {
+                                void* dxDev = ghostty_surface_dx_device(s->surface);
+                                if (dxDev) dx_set_surface_visible(dxDev, s->hwnd == selHwnd);
                             }
                         }
+                        SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE);
                         SetFocus(selHwnd);
                     });
 
@@ -373,13 +378,19 @@ int APIENTRY wWinMain(
                             return;
                         }
 
-                        // Switch to next tab FIRST (surface is already the right size)
+                        // Switch to next tab FIRST via DirectComposition
                         if (auto sel = tv.SelectedItem()) {
                             auto selItem = sel.as<muxc::TabViewItem>();
                             uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
                             HWND selHwnd = reinterpret_cast<HWND>(selTag);
+                            for (auto& s : bridge.sessions()) {
+                                if (s->hwnd && s->surface) {
+                                    void* dxDev = ghostty_surface_dx_device(s->surface);
+                                    if (dxDev) dx_set_surface_visible(dxDev, s->hwnd == selHwnd);
+                                }
+                            }
                             SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                                SWP_NOMOVE | SWP_NOSIZE);
                             SetFocus(selHwnd);
                         }
 
