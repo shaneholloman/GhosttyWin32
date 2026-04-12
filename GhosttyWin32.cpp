@@ -163,6 +163,7 @@ int APIENTRY wWinMain(
                     hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
 
                 session->xamlHostWnd = xamlHostWnd;
+                bridge.m_xamlHostWnd = xamlHostWnd;
 
                 xamlSource = DesktopWindowXamlSource();
                 auto interop = xamlSource.as<IDesktopWindowXamlSourceNative>();
@@ -171,6 +172,7 @@ int APIENTRY wWinMain(
                 HWND islandHwnd = nullptr;
                 winrt::check_hresult(interop->get_WindowHandle(&islandHwnd));
                 session->xamlIslandHwnd = islandHwnd;
+                bridge.m_xamlIslandHwnd = islandHwnd;
 
                 // Fill the host window.
                 SetWindowPos(islandHwnd, nullptr, 0, 0,
@@ -319,10 +321,8 @@ int APIENTRY wWinMain(
                     [parentHwnd, &bridge](muxc::TabView const& tv, auto&&) {
                         auto* newSess = bridge.createSurface(parentHwnd);
                         if (!newSess) return;
-                        // TODO: reduce flicker on new tab creation
-                        ShowWindow(newSess->hwnd, SW_SHOW);
-                        SetFocus(newSess->hwnd);
-                        // Add a new tab
+                        // Add tab and select — SelectionChanged handles
+                        // DirectComposition visibility and focus.
                         auto newTab = muxc::TabViewItem();
                         newTab.Header(winrt::box_value(L"Terminal"));
                         newTab.Tag(winrt::box_value(reinterpret_cast<uint64_t>(newSess->hwnd)));
