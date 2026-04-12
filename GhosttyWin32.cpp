@@ -327,7 +327,7 @@ int APIENTRY wWinMain(
                         tv.SelectedItem(newTab);
                     });
 
-                // Tab selection changed: bring selected surface to top
+                // Tab selection changed: show selected, hide others, set focus
                 tabView.SelectionChanged(
                     [parentHwnd, &bridge](auto&& sender, auto&&) {
                         auto tv = sender.template as<muxc::TabView>();
@@ -338,6 +338,11 @@ int APIENTRY wWinMain(
                         HWND selHwnd = reinterpret_cast<HWND>(selTag);
                         SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        for (auto& s : bridge.sessions()) {
+                            if (s->hwnd && s->hwnd != selHwnd) {
+                                ShowWindow(s->hwnd, SW_HIDE);
+                            }
+                        }
                         SetFocus(selHwnd);
                     });
 
@@ -370,13 +375,18 @@ int APIENTRY wWinMain(
                             return;
                         }
 
-                        // Bring the newly selected tab's session to top
+                        // Show selected, hide others, set focus
                         if (auto sel = tv.SelectedItem()) {
                             auto selItem = sel.as<muxc::TabViewItem>();
                             uint64_t selTag = winrt::unbox_value<uint64_t>(selItem.Tag());
                             HWND selHwnd = reinterpret_cast<HWND>(selTag);
                             SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                            for (auto& s : bridge.sessions()) {
+                                if (s->hwnd && s->hwnd != selHwnd) {
+                                    ShowWindow(s->hwnd, SW_HIDE);
+                                }
+                            }
                             SetFocus(selHwnd);
                         }
                     });

@@ -644,10 +644,12 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
         }
-        // Resize the rendering child below the header.
-        if (sess->hwnd) {
-            SetWindowPos(sess->hwnd, nullptr, 0, top, width, childHeight,
-                SWP_NOZORDER | SWP_NOACTIVATE);
+        // Resize all rendering children (including hidden tabs)
+        for (auto& s : bridge.m_sessions) {
+            if (s->hwnd) {
+                SetWindowPos(s->hwnd, nullptr, 0, top, width, childHeight,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
         }
         return 0;
     }
