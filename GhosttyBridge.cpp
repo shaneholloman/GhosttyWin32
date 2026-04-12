@@ -27,6 +27,8 @@ extern "C" void dx_set_surface_visible(void* dev, bool visible);
 
 GhosttyBridge::TitleChangedFn GhosttyBridge::s_titleChangedFn = nullptr;
 void* GhosttyBridge::s_titleChangedCtx = nullptr;
+GhosttyBridge::BgColorChangedFn GhosttyBridge::s_bgColorChangedFn = nullptr;
+void* GhosttyBridge::s_bgColorChangedCtx = nullptr;
 
 // Helper: copy UTF-8 text to Windows clipboard
 static bool copyToClipboard(HWND hwnd, const char* utf8, size_t utf8Len) {
@@ -1128,6 +1130,7 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
             // Set title bar color to match terminal background (Windows 10/11)
             COLORREF color = RGB(cc.r, cc.g, cc.b);
             bridge.m_bgColor = color;
+            if (s_bgColorChangedFn) s_bgColorChangedFn(s_bgColorChangedCtx, cc.r, cc.g, cc.b);
             DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &color, sizeof(color));
 
             // Also set title bar text color: light text on dark bg, dark text on light bg

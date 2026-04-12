@@ -189,6 +189,11 @@ int APIENTRY wWinMain(
                 // Root layout: TabView on the left, system buttons on the right
                 auto root = controls::Grid();
                 root.RequestedTheme(xaml::ElementTheme::Dark);
+                root.Background(media::SolidColorBrush(
+                    winrt::Windows::UI::ColorHelper::FromArgb(255,
+                        GetRValue(bridge.m_bgColor),
+                        GetGValue(bridge.m_bgColor),
+                        GetBValue(bridge.m_bgColor))));
                 root.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
                 root.VerticalAlignment(xaml::VerticalAlignment::Stretch);
 
@@ -282,26 +287,27 @@ int APIENTRY wWinMain(
                     btn.Background(media::SolidColorBrush(
                         winrt::Windows::UI::ColorHelper::FromArgb(0, 0, 0, 0)));
                     btn.Width(w);
-                    btn.Height(32);
+                    btn.Height(TerminalSession::kDefaultHeaderHeight);
                     btn.Padding(xaml::ThicknessHelper::FromUniformLength(0));
                     btn.BorderThickness(xaml::ThicknessHelper::FromUniformLength(0));
                     btn.VerticalAlignment(xaml::VerticalAlignment::Top);
                     return btn;
                 };
 
-                auto minBtn = makeBtn(L"\xE949", 46);  // Minimize icon
+                auto minBtn = makeBtn(L"\xE949", 46);  // ChromeMinimize
                 minBtn.FontFamily(media::FontFamily(L"Segoe MDL2 Assets"));
                 minBtn.Click([mainWnd](auto&&, auto&&) {
                     ShowWindow(mainWnd, SW_MINIMIZE);
                 });
 
-                auto maxBtn = makeBtn(L"\xE739", 46);  // Maximize icon
+                auto maxBtn = makeBtn(L"\xE922", 46);  // ChromeMaximize
                 maxBtn.FontFamily(media::FontFamily(L"Segoe MDL2 Assets"));
                 maxBtn.Click([mainWnd](auto&&, auto&&) {
                     ShowWindow(mainWnd, IsZoomed(mainWnd) ? SW_RESTORE : SW_MAXIMIZE);
                 });
 
-                auto closeBtn = makeBtn(L"\xE106", 46);  // Close icon
+                auto closeBtn = makeBtn(L"\xE8BB", 46);  // ChromeClose
+                closeBtn.FontFamily(media::FontFamily(L"Segoe MDL2 Assets"));
                 closeBtn.Click([mainWnd](auto&&, auto&&) {
                     PostMessageW(mainWnd, WM_CLOSE, 0, 0);
                 });
@@ -415,7 +421,17 @@ int APIENTRY wWinMain(
                 // Title sync: when ghostty sets a surface title, update the
                 // matching TabViewItem header.
                 static winrt::Microsoft::UI::Xaml::Controls::TabView s_tabView{ nullptr };
+                static winrt::Windows::UI::Xaml::Controls::Grid s_rootGrid{ nullptr };
                 s_tabView = tabView;
+                s_rootGrid = root;
+
+                // Update tab bar background when terminal bg color changes
+                GhosttyBridge::s_bgColorChangedFn = [](void*, uint8_t r, uint8_t g, uint8_t b) {
+                    if (!s_rootGrid) return;
+                    namespace media = winrt::Windows::UI::Xaml::Media;
+                    s_rootGrid.Background(media::SolidColorBrush(
+                        winrt::Windows::UI::ColorHelper::FromArgb(255, r, g, b)));
+                };
                 GhosttyBridge::s_titleChangedFn = [](void*, HWND sessHwnd, const wchar_t* title) {
                     if (!s_tabView) return;
                     namespace muxc = winrt::Microsoft::UI::Xaml::Controls;

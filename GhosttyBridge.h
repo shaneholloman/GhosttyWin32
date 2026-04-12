@@ -101,6 +101,10 @@ public:
     // sessionHwnd identifies which tab to update.
     using TitleChangedFn = void(*)(void* ctx, HWND sessionHwnd, const wchar_t* title);
     static TitleChangedFn s_titleChangedFn;
+
+    using BgColorChangedFn = void(*)(void* ctx, uint8_t r, uint8_t g, uint8_t b);
+    static BgColorChangedFn s_bgColorChangedFn;
+    static void* s_bgColorChangedCtx;
     static void* s_titleChangedCtx;
 
     ghostty_app_t m_app = nullptr;
