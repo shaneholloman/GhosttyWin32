@@ -573,7 +573,6 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         break;
     case WM_NCHITTEST: {
         // Manual hit-testing: resize edges → header drag region → client.
-        if (!sess) break;
         RECT rc;
         GetClientRect(hwnd, &rc);
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -593,7 +592,8 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         if (bottom) return HTBOTTOM;
         // Header area (tab bar strip): check if a XAML element is under
         // the cursor. If not (empty space), return HTCAPTION for drag.
-        if (sess->headerHeight > 0 && pt.y < sess->headerHeight) {
+        int headerHeight = sess ? sess->headerHeight : TerminalSession::kDefaultHeaderHeight;
+        if (headerHeight > 0 && pt.y < headerHeight) {
             // Ask the XAML Island's interop hwnd if it wants this point.
             // ChildWindowFromPoint skips the drag bar and checks the
             // XAML host; if the deepest child is the host itself (no
@@ -632,17 +632,23 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         return 0;
 
     case WM_SIZE: {
-        if (!sess) return 0;
         int width = LOWORD(lParam);
         int height = HIWORD(lParam);
-        int top = sess->headerHeight;
+        int top = sess ? sess->headerHeight : TerminalSession::kDefaultHeaderHeight;
         int childHeight = height - top;
         if (childHeight < 1) childHeight = 1;
-        if (sess->xamlHostWnd && top > 0) {
-            SetWindowPos(sess->xamlHostWnd, nullptr, 0, 0, width, top,
+        // Resize XAML host (use sess if available, otherwise find from sessions)
+        HWND xamlHost = sess ? sess->xamlHostWnd : nullptr;
+        HWND xamlIsland = sess ? sess->xamlIslandHwnd : nullptr;
+        if (!xamlHost && !bridge.m_sessions.empty()) {
+            xamlHost = bridge.m_sessions.front()->xamlHostWnd;
+            xamlIsland = bridge.m_sessions.front()->xamlIslandHwnd;
+        }
+        if (xamlHost && top > 0) {
+            SetWindowPos(xamlHost, nullptr, 0, 0, width, top,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            if (sess->xamlIslandHwnd) {
-                SetWindowPos(sess->xamlIslandHwnd, nullptr, 0, 0, width, top,
+            if (xamlIsland) {
+                SetWindowPos(xamlIsland, nullptr, 0, 0, width, top,
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
         }
@@ -1059,7 +1065,7 @@ bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty
         // hides the XAML header strip (and with it, tabs and the drag region).
         if (sess && hwnd) {
             sess->decorations = !sess->decorations;
-            sess->headerHeight = sess->decorations ? 32 : 0;
+            sess->headerHeight = sess->decorations ? TerminalSession::kDefaultHeaderHeight : 0;
             RECT rc;
             GetClientRect(hwnd, &rc);
             SendMessageW(hwnd, WM_SIZE, SIZE_RESTORED,
