@@ -106,5 +106,10 @@ public:
     ghostty_config_t m_config = nullptr;
     bool m_initialized = false;
 
+    // Main window HWND for thread-safe wakeup posting.
+    // Set once during first createSurface, never changes after.
+    // onWakeup uses this instead of m_sessions to avoid data races.
+    HWND m_wakeupHwnd = nullptr;
+
     std::vector<std::unique_ptr<TerminalSession>> m_sessions;
 };

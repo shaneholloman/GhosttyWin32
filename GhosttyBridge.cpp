@@ -19,7 +19,9 @@
 #pragma comment(lib, "gdi32.lib")
 
 // DirectX renderer: notify resize from main thread (exported from ghostty.dll)
-extern "C" void dx_notify_resize(uint32_t w, uint32_t h);
+extern "C" void dx_notify_resize(void* dev, uint32_t w, uint32_t h);
+// Get the DxDevice pointer from a ghostty surface (returns the per-surface device)
+extern "C" void* ghostty_surface_dx_device(void* surface);
 
 GhosttyBridge::TitleChangedFn GhosttyBridge::s_titleChangedFn = nullptr;
 void* GhosttyBridge::s_titleChangedCtx = nullptr;
@@ -376,8 +378,11 @@ LRESULT CALLBACK GhosttyBridge::glWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         UINT width = LOWORD(lParam);
         UINT height = HIWORD(lParam);
         if (width > 0 && height > 0) {
-            // Notify DirectX renderer of new size (thread-safe atomic write)
-            dx_notify_resize(width, height);
+            // Notify the per-surface DirectX device of the new size
+            if (hasSurface) {
+                void* dxDev = ghostty_surface_dx_device(sess->surface);
+                dx_notify_resize(dxDev, width, height);
+            }
             if (hasSurface) {
                 ghostty_surface_set_size(sess->surface, width, height);
                 ghostty_surface_refresh(sess->surface);
@@ -550,8 +555,7 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         if (wParam == TRUE) return 0;
         break;
     case WM_NCHITTEST: {
-        // Manual hit-testing: resize edges first (6px border), then the header
-        // strip is the drag region (HTCAPTION), then everything else is client.
+        // Manual hit-testing: resize edges → header drag region → client.
         if (!sess) break;
         RECT rc;
         GetClientRect(hwnd, &rc);
@@ -570,9 +574,33 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         if (right) return HTRIGHT;
         if (top) return HTTOP;
         if (bottom) return HTBOTTOM;
-        // Header area: HTCLIENT so XAML can receive clicks when the
-        // drag bar overlay returns HTTRANSPARENT. The drag bar itself
-        // returns HTCAPTION for empty areas (handled by its WndProc).
+        // Header area (tab bar strip): check if a XAML element is under
+        // the cursor. If not (empty space), return HTCAPTION for drag.
+        if (sess->headerHeight > 0 && pt.y < sess->headerHeight) {
+            // Ask the XAML Island's interop hwnd if it wants this point.
+            // ChildWindowFromPoint skips the drag bar and checks the
+            // XAML host; if the deepest child is the host itself (no
+            // interactive element), treat it as draggable empty space.
+            POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            HWND hit = WindowFromPoint(screenPt);
+            // If the hit window is the main window itself or a non-XAML
+            // child, it's empty header space — allow dragging.
+            if (hit == hwnd) return HTCAPTION;
+            // Check if the hit window is an interactive XAML element by
+            // walking up to see if it's a child of our main window.
+            // The XAML Island's internal windows handle their own clicks.
+            // For the gap between TabView and buttons (drag area column),
+            // the XAML host window receives the hit but has no interactive
+            // content → we detect this by checking the class name.
+            wchar_t cls[64] = {};
+            GetClassNameW(hit, cls, 64);
+            // "Windows.UI.Input.InputSite.WindowClass" is the XAML
+            // Island's top-level input window. If it's hit directly
+            // (not a button or tab inside it), treat as drag area.
+            if (wcsstr(cls, L"InputSite") || wcsstr(cls, L"XamlHost")) {
+                return HTCAPTION;
+            }
+        }
         return HTCLIENT;
     }
 
@@ -646,6 +674,12 @@ LRESULT CALLBACK GhosttyBridge::mainWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 break;
             }
         }
+        return 0;
+
+    case WM_USER + 1:
+        // Wakeup from ghostty — process pending events on main thread.
+        // Posted by onWakeup() which targets m_wakeupHwnd (this window).
+        if (bridge.m_app) ghostty_app_tick(bridge.m_app);
         return 0;
 
     case WM_CLOSE:
@@ -737,6 +771,11 @@ TerminalSession* GhosttyBridge::createSurface(HWND parentHwnd) {
         session->parentHwnd = parentHwnd;
     }
 
+    // Store main window HWND for thread-safe wakeup (set once, never changes)
+    if (!m_wakeupHwnd) {
+        m_wakeupHwnd = session->parentHwnd;
+    }
+
     // Create the rendering child — session pointer is plumbed through WM_NCCREATE
     session->hwnd = createGLWindow(parentHwnd, session);
     if (!session->hwnd) {
@@ -787,7 +826,22 @@ TerminalSession* GhosttyBridge::createSurface(HWND parentHwnd) {
             UINT dpi = GetDpiForWindow(sess->hwnd);
             surfConfig.scale_factor = (double)dpi / 96.0;
 
-            sess->surface = ghostty_surface_new(a->self->m_app, &surfConfig);
+            {
+                char buf[256];
+                sprintf_s(buf, "ghostty: calling ghostty_surface_new app=%p hwnd=%p sessions=%zu\n",
+                    a->self->m_app, sess->hwnd, a->self->m_sessions.size());
+                OutputDebugStringA(buf);
+            }
+
+            __try {
+                sess->surface = ghostty_surface_new(a->self->m_app, &surfConfig);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                char buf[128];
+                sprintf_s(buf, "ghostty: CRASH in ghostty_surface_new! code=0x%08X\n",
+                    GetExceptionCode());
+                OutputDebugStringA(buf);
+                sess->surface = nullptr;
+            }
 
             // Release GL context BEFORE thread exits so renderer thread can acquire it
             if (!useDirectX) wglMakeCurrent(nullptr, nullptr);
@@ -819,13 +873,14 @@ void GhosttyBridge::destroySession(TerminalSession* session) {
     }
     shutdownOpenGL(session);
     // Clear userdata so pending messages on these hwnds see no session.
-    // Window destruction is driven by WM_CLOSE on the parent — we don't
-    // DestroyWindow here, we just detach.
     if (session->hwnd) {
         SetWindowLongPtrW(session->hwnd, GWLP_USERDATA, 0);
+        DestroyWindow(session->hwnd);
+        session->hwnd = nullptr;
     }
     if (session->parentHwnd) {
         SetWindowLongPtrW(session->parentHwnd, GWLP_USERDATA, 0);
+        // Don't destroy parentHwnd — it's the shared main window for all tabs.
     }
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
         if (it->get() == session) {
@@ -840,12 +895,10 @@ void GhosttyBridge::destroySession(TerminalSession* session) {
 
 void GhosttyBridge::onWakeup(void* userdata) {
     auto* self = static_cast<GhosttyBridge*>(userdata);
-    if (!self) return;
-    // Post to main thread - onWakeup may be called from any thread.
-    // Any session's hwnd works since WM_USER+1 just dispatches ghostty_app_tick.
-    if (!self->m_sessions.empty()) {
-        PostMessageW(self->m_sessions.front()->hwnd, WM_USER + 1, 0, 0);
-    }
+    if (!self || !self->m_wakeupHwnd) return;
+    // Post to the main window — avoids accessing m_sessions which can be
+    // reallocated on the main thread while renderer threads call this.
+    PostMessageW(self->m_wakeupHwnd, WM_USER + 1, 0, 0);
 }
 
 bool GhosttyBridge::onAction(ghostty_app_t app, ghostty_target_s target, ghostty_action_s action) {
