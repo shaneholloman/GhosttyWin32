@@ -13,13 +13,6 @@
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "gdi32.lib")
 
-// DirectX renderer: notify resize from main thread (exported from ghostty.dll)
-extern "C" void dx_notify_resize(void* dev, uint32_t w, uint32_t h);
-// Get the DxDevice pointer from a ghostty surface (returns the per-surface device)
-extern "C" void* ghostty_surface_dx_device(void* surface);
-// DirectComposition visibility control (safe while renderer is active)
-extern "C" void dx_set_surface_visible(void* dev, bool visible);
-
 GhosttyBridge::TitleChangedFn GhosttyBridge::s_titleChangedFn = nullptr;
 void* GhosttyBridge::s_titleChangedCtx = nullptr;
 GhosttyBridge::BgColorChangedFn GhosttyBridge::s_bgColorChangedFn = nullptr;
@@ -385,16 +378,11 @@ LRESULT CALLBACK GhosttyBridge::renderWndProc(HWND hwnd, UINT msg, WPARAM wParam
     case WM_SIZE: {
         UINT width = LOWORD(lParam);
         UINT height = HIWORD(lParam);
-        if (width > 0 && height > 0) {
-            // Notify the per-surface DirectX device of the new size
-            if (hasSurface) {
-                void* dxDev = ghostty_surface_dx_device(sess->surface);
-                dx_notify_resize(dxDev, width, height);
-            }
-            if (hasSurface) {
-                ghostty_surface_set_size(sess->surface, width, height);
-                ghostty_surface_refresh(sess->surface);
-            }
+        if (width > 0 && height > 0 && hasSurface) {
+            // Renderer-agnostic resize notification. For DirectX this routes
+            // to a renderer-thread hook that updates the swap chain size.
+            ghostty_surface_set_size(sess->surface, width, height);
+            ghostty_surface_refresh(sess->surface);
         }
         return 0;
     }

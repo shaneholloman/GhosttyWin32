@@ -3,9 +3,6 @@
 #include <windowsx.h>
 #include "GhosttyBridge.h"
 
-extern "C" void dx_set_surface_visible(void* dev, bool visible);
-extern "C" void* ghostty_surface_dx_device(void* surface);
-
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml::Hosting;
 
@@ -347,8 +344,7 @@ int APIENTRY wWinMain(
                         // Show/hide via DirectComposition (safe while renderers are active)
                         for (auto& s : bridge.sessions()) {
                             if (s->hwnd && s->surface) {
-                                void* dxDev = ghostty_surface_dx_device(s->surface);
-                                if (dxDev) dx_set_surface_visible(dxDev, s->hwnd == selHwnd);
+                                ghostty_surface_set_occlusion(s->surface, s->hwnd == selHwnd);
                             }
                         }
                         SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
@@ -391,8 +387,7 @@ int APIENTRY wWinMain(
                             HWND selHwnd = reinterpret_cast<HWND>(selTag);
                             for (auto& s : bridge.sessions()) {
                                 if (s->hwnd && s->surface) {
-                                    void* dxDev = ghostty_surface_dx_device(s->surface);
-                                    if (dxDev) dx_set_surface_visible(dxDev, s->hwnd == selHwnd);
+                                    ghostty_surface_set_occlusion(s->surface, s->hwnd == selHwnd);
                                 }
                             }
                             SetWindowPos(selHwnd, HWND_TOP, 0, 0, 0, 0,
