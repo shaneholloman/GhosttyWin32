@@ -72,10 +72,11 @@ int APIENTRY wWinMain(
         xamlReady = true;
         DBG_LOG("ghostty: XAML + WinUI 2 initialized\n");
     } catch (winrt::hresult_error const& e) {
-        (void)e;
-        DBG_LOG("ghostty: XAML init failed\n");
+        char buf[128];
+        sprintf_s(buf, "ghostty: XAML init failed hr=0x%08X\n",
+            static_cast<unsigned int>(e.code()));
+        DBG_LOG(buf);
     }
-
     // Default to Mesa Zink (GL→Vulkan) for flicker-free rendering.
     // Set before any OpenGL calls. Users can override with GALLIUM_DRIVER env var.
     if (!GetEnvironmentVariableA("GALLIUM_DRIVER", nullptr, 0)) {
