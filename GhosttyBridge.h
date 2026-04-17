@@ -12,6 +12,18 @@
 #define DBG_LOG(msg) ((void)0)
 #endif
 
+// Returns true if DirectX should be used, false for OpenGL.
+// Accepts "opengl" or "directx"; anything else falls back to DirectX.
+inline bool shouldUseDirectX() {
+    char buf[32] = {};
+    GetEnvironmentVariableA("GHOSTTY_RENDERER", buf, sizeof(buf));
+    if (_stricmp(buf, "opengl") == 0) return false;
+    if (buf[0] != '\0' && _stricmp(buf, "directx") != 0) {
+        DBG_LOG("ghostty: unknown GHOSTTY_RENDERER value, defaulting to DirectX\n");
+    }
+    return true;
+}
+
 // Bridge between libghostty and Win32
 // Equivalent to the Swift AppDelegate on macOS
 

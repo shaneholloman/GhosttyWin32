@@ -766,10 +766,7 @@ void GhosttyBridge::ensureRenderClassRegistered() {
 }
 
 HWND GhosttyBridge::createRendererWindow(HWND parent, TerminalSession* session) {
-    char rendererBuf[32] = {};
-    GetEnvironmentVariableA("GHOSTTY_RENDERER", rendererBuf, sizeof(rendererBuf));
-    bool useDirectX = (strcmp(rendererBuf, "opengl") != 0);
-    return useDirectX
+    return shouldUseDirectX()
         ? createDirectXWindow(parent, session)
         : createGLWindow(parent, session);
 }
@@ -847,10 +844,7 @@ TerminalSession* GhosttyBridge::createSurface(HWND parentHwnd) {
             auto* a = static_cast<Args*>(param);
             TerminalSession* sess = a->session;
 
-            // Default to DirectX, use GHOSTTY_RENDERER=opengl to override
-            char rendererBuf[32] = {};
-            GetEnvironmentVariableA("GHOSTTY_RENDERER", rendererBuf, sizeof(rendererBuf));
-            bool useDirectX = (strcmp(rendererBuf, "opengl") != 0);
+            bool useDirectX = shouldUseDirectX();
 
             if (!useDirectX) {
                 // Create and activate OpenGL context on this thread

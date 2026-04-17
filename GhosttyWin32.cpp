@@ -77,9 +77,9 @@ int APIENTRY wWinMain(
             static_cast<unsigned int>(e.code()));
         DBG_LOG(buf);
     }
-    // Default to Mesa Zink (GL→Vulkan) for flicker-free rendering.
-    // Set before any OpenGL calls. Users can override with GALLIUM_DRIVER env var.
-    if (!GetEnvironmentVariableA("GALLIUM_DRIVER", nullptr, 0)) {
+    // Default to Mesa Zink (GL→Vulkan) for flicker-free OpenGL rendering.
+    // Only set when using the OpenGL renderer; DirectX doesn't use Mesa.
+    if (!shouldUseDirectX() && !GetEnvironmentVariableA("GALLIUM_DRIVER", nullptr, 0)) {
         SetEnvironmentVariableA("GALLIUM_DRIVER", "zink");
     }
 
