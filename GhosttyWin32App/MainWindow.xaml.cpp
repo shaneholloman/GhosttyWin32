@@ -43,6 +43,98 @@ namespace winrt::GhosttyWin32::implementation
                 this->SystemBackdrop(backdrop);
             }
 
+            // IME via CoreTextEditContext
+            {
+                namespace txtCore = winrt::Windows::UI::Text::Core;
+                auto manager = txtCore::CoreTextServicesManager::GetForCurrentView();
+                m_editContext = manager.CreateEditContext();
+                m_editContext.InputPaneDisplayPolicy(txtCore::CoreTextInputPaneDisplayPolicy::Manual);
+                m_editContext.InputScope(txtCore::CoreTextInputScope::Default);
+
+                m_editContext.TextRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextTextRequestedEventArgs const& args) {
+                    args.Request().Text(winrt::hstring(m_imeBuffer));
+                });
+
+                m_editContext.SelectionRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextSelectionRequestedEventArgs const& args) {
+                    int32_t end = static_cast<int32_t>(m_imeBuffer.size());
+                    args.Request().Selection({ end, end });
+                });
+
+                m_editContext.TextUpdating([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextTextUpdatingEventArgs const& args) {
+                    auto range = args.Range();
+                    auto newText = args.Text();
+                    int32_t bufLen = static_cast<int32_t>(m_imeBuffer.size());
+                    int32_t start = std::clamp(range.StartCaretPosition, 0, bufLen);
+                    int32_t end = std::clamp(range.EndCaretPosition, start, bufLen);
+                    m_imeBuffer.replace(start, end - start, newText.c_str(), newText.size());
+
+                    auto* sess = ActiveSession();
+                    if (!sess || !sess->surface) return;
+
+                    if (m_composing) {
+                        if (m_imeBuffer.empty()) {
+                            ghostty_surface_preedit(sess->surface, nullptr, 0);
+                        } else {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, m_imeBuffer.c_str(), (int)m_imeBuffer.size(), nullptr, 0, nullptr, nullptr);
+                            if (len > 0) {
+                                std::string utf8(len, '\0');
+                                WideCharToMultiByte(CP_UTF8, 0, m_imeBuffer.c_str(), (int)m_imeBuffer.size(), utf8.data(), len, nullptr, nullptr);
+                                ghostty_surface_preedit(sess->surface, utf8.c_str(), utf8.size());
+                            }
+                        }
+                    }
+                    if (m_app) ghostty_app_tick(m_app);
+                    ghostty_surface_refresh(sess->surface);
+                });
+
+                m_editContext.CompositionStarted([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextCompositionStartedEventArgs const&) {
+                    m_composing = true;
+                    m_imeBuffer.clear();
+                });
+
+                m_editContext.CompositionCompleted([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextCompositionCompletedEventArgs const&) {
+                    m_composing = false;
+                    auto* sess = ActiveSession();
+                    if (sess && sess->surface) {
+                        ghostty_surface_preedit(sess->surface, nullptr, 0);
+                        if (!m_imeBuffer.empty()) {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, m_imeBuffer.c_str(), (int)m_imeBuffer.size(), nullptr, 0, nullptr, nullptr);
+                            if (len > 0) {
+                                std::string utf8(len, '\0');
+                                WideCharToMultiByte(CP_UTF8, 0, m_imeBuffer.c_str(), (int)m_imeBuffer.size(), utf8.data(), len, nullptr, nullptr);
+                                ghostty_surface_text(sess->surface, utf8.c_str(), utf8.size());
+                            }
+                        }
+                        if (m_app) ghostty_app_tick(m_app);
+                        ghostty_surface_refresh(sess->surface);
+                    }
+                    m_imeBuffer.clear();
+                });
+
+                m_editContext.LayoutRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextLayoutRequestedEventArgs const& args) {
+                    auto* sess = ActiveSession();
+                    if (!sess || !sess->surface || !m_hwnd) return;
+                    double x = 0, y = 0, w = 0, h = 0;
+                    ghostty_surface_ime_point(sess->surface, &x, &y, &w, &h);
+                    POINT screenPt = { (LONG)x, (LONG)y };
+                    ClientToScreen(m_hwnd, &screenPt);
+                    winrt::Windows::Foundation::Rect bounds{
+                        (float)screenPt.x, (float)screenPt.y, (float)w, (float)h };
+                    args.Request().LayoutBounds().ControlBounds(bounds);
+                    args.Request().LayoutBounds().TextBounds(bounds);
+                });
+
+                m_editContext.FocusRemoved([this](txtCore::CoreTextEditContext const&, auto&&) {
+                    if (m_composing) {
+                        m_composing = false;
+                        m_imeBuffer.clear();
+                        auto* sess = ActiveSession();
+                        if (sess && sess->surface)
+                            ghostty_surface_preedit(sess->surface, nullptr, 0);
+                    }
+                });
+            }
+
             auto tv = TabView();
             SetTitleBar(DragRegion());
 
@@ -60,6 +152,9 @@ namespace winrt::GhosttyWin32::implementation
                 UINT scanCode = args.KeyStatus().ScanCode;
                 bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
                 bool shift = GetKeyState(VK_SHIFT) & 0x8000;
+
+                // IME is processing this key
+                if (vk == VK_PROCESSKEY || m_composing) return;
 
                 // Ctrl+C: copy if selection exists, otherwise send SIGINT
                 if (ctrl && !shift && vk == 'C') {
@@ -543,6 +638,9 @@ namespace winrt::GhosttyWin32::implementation
                 ShowWindow(hwnd, SW_SHOW);
                 ctx->sess->panel.Opacity(1);
 
+                if (g_mainWindow && g_mainWindow->m_editContext)
+                    g_mainWindow->m_editContext.NotifyFocusEnter();
+
 
                 auto surface = ctx->surface;
                 auto panel = ctx->sess->panel;
@@ -554,6 +652,13 @@ namespace winrt::GhosttyWin32::implementation
                         ghostty_surface_set_size(surface, w, h);
                     }
                 });
+
+                // Initial size sync — panel may already have its final size
+                uint32_t pw = static_cast<uint32_t>(panel.ActualWidth());
+                uint32_t ph = static_cast<uint32_t>(panel.ActualHeight());
+                if (pw > 0 && ph > 0) {
+                    ghostty_surface_set_size(surface, pw, ph);
+                }
 
                 delete ctx;
             });

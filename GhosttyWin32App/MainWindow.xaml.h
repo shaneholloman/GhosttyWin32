@@ -28,6 +28,9 @@ namespace winrt::GhosttyWin32::implementation
         ghostty_app_t m_app = nullptr;
         ghostty_config_t m_config = nullptr;
         HWND m_hwnd = nullptr;
+        winrt::Windows::UI::Text::Core::CoreTextEditContext m_editContext{ nullptr };
+        bool m_composing = false;
+        std::wstring m_imeBuffer;
         std::vector<std::unique_ptr<TabSession>> m_sessions;
     };
 }
