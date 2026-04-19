@@ -5,7 +5,7 @@
 #endif
 #include <microsoft.ui.xaml.window.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 
@@ -372,6 +372,8 @@ namespace winrt::GhosttyWin32::implementation
         }
         if (m_app) ghostty_app_free(m_app);
         if (m_config) ghostty_config_free(m_config);
+        if (m_dxgiAdapter) { m_dxgiAdapter->Release(); m_dxgiAdapter = nullptr; }
+        if (m_dxgiFactory) { m_dxgiFactory->Release(); m_dxgiFactory = nullptr; }
     }
 
     TabSession* MainWindow::ActiveSession()
@@ -388,6 +390,11 @@ namespace winrt::GhosttyWin32::implementation
 
     void MainWindow::InitGhostty()
     {
+        // Cache DXGI factory and adapter for fast per-tab device creation
+        CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&m_dxgiFactory);
+        if (m_dxgiFactory) {
+            m_dxgiFactory->EnumAdapters(0, &m_dxgiAdapter);
+        }
 
         struct Args { MainWindow* self; };
         Args args{ this };
@@ -560,27 +567,25 @@ namespace winrt::GhosttyWin32::implementation
             UINT width = std::max<UINT>(rc.right - rc.left, 1);
             UINT height = std::max<UINT>(rc.bottom - rc.top, 1);
 
-            // Create a D3D11 device per tab — each surface needs its own
-            // device+context to avoid multithreading conflicts
+            // Create D3D11 device using cached adapter (skip adapter enumeration)
+            auto* dxgiAdapter = self->m_dxgiAdapter;
+            auto* dxgiFactory = self->m_dxgiFactory;
+            if (!dxgiAdapter || !dxgiFactory) return;
+
             ID3D11Device* device = nullptr;
-            UINT flags = 0;
+            UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED
+                       | D3D11_CREATE_DEVICE_BGRA_SUPPORT
+                       | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
 #ifndef NDEBUG
             flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
             D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
-            D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+            D3D11CreateDevice(dxgiAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
                 levels, 1, D3D11_SDK_VERSION, &device, nullptr, nullptr);
             if (!device) return;
             sess->device = device;
 
-            // Create swap chain and link to panel
-            IDXGIDevice* dxgiDev = nullptr;
-            IDXGIAdapter* adapter = nullptr;
-            IDXGIFactory2* factory = nullptr;
-            device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDev);
-            dxgiDev->GetAdapter(&adapter);
-            adapter->GetParent(__uuidof(IDXGIFactory2), (void**)&factory);
-
+            // Create swap chain using cached factory
             DXGI_SWAP_CHAIN_DESC1 scd = {};
             scd.Width = width;
             scd.Height = height;
@@ -593,8 +598,7 @@ namespace winrt::GhosttyWin32::implementation
             scd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
             IDXGISwapChain1* swapChain = nullptr;
-            factory->CreateSwapChainForComposition(device, &scd, nullptr, &swapChain);
-            factory->Release(); adapter->Release(); dxgiDev->Release();
+            dxgiFactory->CreateSwapChainForComposition(device, &scd, nullptr, &swapChain);
             if (!swapChain) return;
 
             p.template as<ISwapChainPanelNative>()->SetSwapChain(swapChain);
