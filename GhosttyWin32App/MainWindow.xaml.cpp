@@ -345,14 +345,22 @@ namespace winrt::GhosttyWin32::implementation
             });
 
             tv.TabCloseRequested([this](muxc::TabView const& sender, muxc::TabViewTabCloseRequestedEventArgs const& args) {
-                uint32_t idx = 0;
-                if (sender.TabItems().IndexOf(args.Tab(), idx) && idx < m_sessions.size()) {
-                    if (m_sessions[idx]->surface) ghostty_surface_free(m_sessions[idx]->surface);
-                    if (m_sessions[idx]->swapChain) m_sessions[idx]->swapChain->Release();
-                    if (m_sessions[idx]->device) m_sessions[idx]->device->Release();
-                    m_sessions.erase(m_sessions.begin() + idx);
-                    sender.TabItems().RemoveAt(idx);
+                // Find session by panel content match (works after tab reorder)
+                auto tab = args.Tab();
+                auto content = tab.Content();
+                uint32_t tabIdx = 0;
+                sender.TabItems().IndexOf(tab, tabIdx);
+
+                for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+                    if (content && (*it)->panel == content.as<muxc::SwapChainPanel>()) {
+                        if ((*it)->surface) ghostty_surface_free((*it)->surface);
+                        if ((*it)->swapChain) (*it)->swapChain->Release();
+                        if ((*it)->device) (*it)->device->Release();
+                        m_sessions.erase(it);
+                        break;
+                    }
                 }
+                sender.TabItems().RemoveAt(tabIdx);
                 if (sender.TabItems().Size() == 0) {
                     this->Close();
                 }
@@ -381,9 +389,15 @@ namespace winrt::GhosttyWin32::implementation
         auto tv = TabView();
         auto sel = tv.SelectedItem();
         if (!sel) return nullptr;
-        uint32_t idx = 0;
-        if (tv.TabItems().IndexOf(sel, idx) && idx < m_sessions.size()) {
-            return m_sessions[idx].get();
+        auto tab = sel.as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+        if (!tab) return nullptr;
+        auto content = tab.Content();
+        if (!content) return nullptr;
+        // Match by panel reference — works even after tab reorder
+        for (auto& s : m_sessions) {
+            if (s->panel == content.as<winrt::Microsoft::UI::Xaml::Controls::SwapChainPanel>()) {
+                return s.get();
+            }
         }
         return nullptr;
     }
