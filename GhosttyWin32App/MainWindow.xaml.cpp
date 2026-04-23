@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "MainWindow.xaml.h"
+#include "Clipboard.h"
+#include "InputHelper.h"
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -158,22 +160,9 @@ namespace winrt::GhosttyWin32::implementation
                     if (ghostty_surface_has_selection(sess->surface)) {
                         ghostty_text_s text = {};
                         if (ghostty_surface_read_selection(sess->surface, &text) && text.text && text.text_len > 0) {
-                            int wlen = MultiByteToWideChar(CP_UTF8, 0, text.text, (int)text.text_len, nullptr, 0);
-                            if (wlen > 0 && OpenClipboard(m_hwnd)) {
-                                EmptyClipboard();
-                                HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (wlen + 1) * sizeof(wchar_t));
-                                if (hMem) {
-                                    wchar_t* dest = static_cast<wchar_t*>(GlobalLock(hMem));
-                                    MultiByteToWideChar(CP_UTF8, 0, text.text, (int)text.text_len, dest, wlen);
-                                    dest[wlen] = L'\0';
-                                    GlobalUnlock(hMem);
-                                    SetClipboardData(CF_UNICODETEXT, hMem);
-                                }
-                                CloseClipboard();
-                            }
+                            Clipboard::writeSelection(m_hwnd, text.text, text.text_len);
                             ghostty_surface_free_text(sess->surface, &text);
                         }
-                        // Clear selection
                         ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
                         ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
                         args.Handled(true);
@@ -183,21 +172,9 @@ namespace winrt::GhosttyWin32::implementation
 
                 // Ctrl+V: paste from clipboard
                 if (ctrl && !shift && vk == 'V') {
-                    if (OpenClipboard(m_hwnd)) {
-                        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-                        if (hData) {
-                            wchar_t* wstr = static_cast<wchar_t*>(GlobalLock(hData));
-                            if (wstr) {
-                                int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
-                                if (len > 1) {
-                                    std::string utf8(len - 1, '\0');
-                                    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, utf8.data(), len, nullptr, nullptr);
-                                    ghostty_surface_text(sess->surface, utf8.c_str(), utf8.size());
-                                }
-                                GlobalUnlock(hData);
-                            }
-                        }
-                        CloseClipboard();
+                    auto text = Clipboard::readText(m_hwnd);
+                    if (!text.empty()) {
+                        ghostty_surface_text(sess->surface, text.c_str(), text.size());
                     }
                     if (m_app) ghostty_app_tick(m_app);
                     ghostty_surface_refresh(sess->surface);
@@ -210,9 +187,7 @@ namespace winrt::GhosttyWin32::implementation
                 keyEvent.action = GHOSTTY_ACTION_PRESS;
                 keyEvent.keycode = scanCode;
                 if (args.KeyStatus().IsExtendedKey) keyEvent.keycode |= 0xE000;
-                if (shift) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_SHIFT);
-                if (ctrl) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_CTRL);
-                if (GetKeyState(VK_MENU) & 0x8000) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_ALT);
+                keyEvent.mods = InputHelper::currentMods();
                 ghostty_surface_key(sess->surface, keyEvent);
 
                 // Translate to text using ToUnicode (replaces CharacterReceived)
@@ -239,11 +214,7 @@ namespace winrt::GhosttyWin32::implementation
                 if (!sess || !sess->surface) return;
                 winrt::Microsoft::UI::Input::PointerPoint point = args.GetCurrentPoint(sess->panel);
                 winrt::Windows::Foundation::Point pos = point.Position();
-                ghostty_input_mods_e mods = (ghostty_input_mods_e)0;
-                if (GetKeyState(VK_SHIFT) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_SHIFT);
-                if (GetKeyState(VK_CONTROL) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_CTRL);
-                if (GetKeyState(VK_MENU) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_ALT);
-                ghostty_surface_mouse_pos(sess->surface, pos.X, pos.Y, mods);
+                ghostty_surface_mouse_pos(sess->surface, pos.X, pos.Y, InputHelper::currentMods());
             });
 
             root.PointerPressed([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
@@ -258,22 +229,9 @@ namespace winrt::GhosttyWin32::implementation
                     if (ghostty_surface_has_selection(sess->surface)) {
                         ghostty_text_s text = {};
                         if (ghostty_surface_read_selection(sess->surface, &text) && text.text && text.text_len > 0) {
-                            int wlen = MultiByteToWideChar(CP_UTF8, 0, text.text, (int)text.text_len, nullptr, 0);
-                            if (wlen > 0 && OpenClipboard(m_hwnd)) {
-                                EmptyClipboard();
-                                HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (wlen + 1) * sizeof(wchar_t));
-                                if (hMem) {
-                                    wchar_t* dest = static_cast<wchar_t*>(GlobalLock(hMem));
-                                    MultiByteToWideChar(CP_UTF8, 0, text.text, (int)text.text_len, dest, wlen);
-                                    dest[wlen] = L'\0';
-                                    GlobalUnlock(hMem);
-                                    SetClipboardData(CF_UNICODETEXT, hMem);
-                                }
-                                CloseClipboard();
-                            }
+                            Clipboard::writeSelection(m_hwnd, text.text, text.text_len);
                             ghostty_surface_free_text(sess->surface, &text);
                         }
-                        // Clear selection
                         ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
                         ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
                         return;
@@ -281,21 +239,13 @@ namespace winrt::GhosttyWin32::implementation
                     btn = GHOSTTY_MOUSE_RIGHT;
                 }
                 else return; // Ignore middle-click and others
-                ghostty_input_mods_e mods = (ghostty_input_mods_e)0;
-                if (GetKeyState(VK_SHIFT) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_SHIFT);
-                if (GetKeyState(VK_CONTROL) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_CTRL);
-                if (GetKeyState(VK_MENU) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_ALT);
-                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, btn, mods);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_PRESS, btn, InputHelper::currentMods());
             });
 
-            root.PointerReleased([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            root.PointerReleased([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
                 auto* sess = ActiveSession();
                 if (!sess || !sess->surface) return;
-                ghostty_input_mods_e mods = (ghostty_input_mods_e)0;
-                if (GetKeyState(VK_SHIFT) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_SHIFT);
-                if (GetKeyState(VK_CONTROL) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_CTRL);
-                if (GetKeyState(VK_MENU) & 0x8000) mods = (ghostty_input_mods_e)(mods | GHOSTTY_MODS_ALT);
-                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods);
+                ghostty_surface_mouse_button(sess->surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, InputHelper::currentMods());
             });
 
             root.PointerWheelChanged([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
@@ -317,9 +267,7 @@ namespace winrt::GhosttyWin32::implementation
                 keyEvent.action = GHOSTTY_ACTION_RELEASE;
                 keyEvent.keycode = args.KeyStatus().ScanCode;
                 if (args.KeyStatus().IsExtendedKey) keyEvent.keycode |= 0xE000;
-                if (GetKeyState(VK_SHIFT) & 0x8000) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_SHIFT);
-                if (GetKeyState(VK_CONTROL) & 0x8000) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_CTRL);
-                if (GetKeyState(VK_MENU) & 0x8000) keyEvent.mods = (ghostty_input_mods_e)(keyEvent.mods | GHOSTTY_MODS_ALT);
+                keyEvent.mods = InputHelper::currentMods();
                 ghostty_surface_key(sess->surface, keyEvent);
             });
 
@@ -477,23 +425,10 @@ namespace winrt::GhosttyWin32::implementation
                     if (!g_mainWindow) return false;
                     auto* sess = g_mainWindow->ActiveSession();
                     if (!sess || !sess->surface) return false;
-                    if (!OpenClipboard(g_mainWindow->m_hwnd)) return false;
-                    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-                    if (!hData) { CloseClipboard(); return false; }
-                    wchar_t* wstr = static_cast<wchar_t*>(GlobalLock(hData));
-                    if (!wstr) { CloseClipboard(); return false; }
-                    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
-                    if (len > 0) {
-                        std::string utf8(len - 1, '\0');
-                        WideCharToMultiByte(CP_UTF8, 0, wstr, -1, utf8.data(), len, nullptr, nullptr);
-                        GlobalUnlock(hData);
-                        CloseClipboard();
-                        ghostty_surface_complete_clipboard_request(sess->surface, utf8.c_str(), state, false);
-                        return true;
-                    }
-                    GlobalUnlock(hData);
-                    CloseClipboard();
-                    return false;
+                    auto text = Clipboard::readText(g_mainWindow->m_hwnd);
+                    if (text.empty()) return false;
+                    ghostty_surface_complete_clipboard_request(sess->surface, text.c_str(), state, false);
+                    return true;
                 };
                 rtConfig.confirm_read_clipboard_cb = [](void*, const char* content, void* state, ghostty_clipboard_request_e) {
                     // Auto-confirm clipboard reads
@@ -505,23 +440,9 @@ namespace winrt::GhosttyWin32::implementation
                     }
                 };
                 rtConfig.write_clipboard_cb = [](void*, ghostty_clipboard_e, const ghostty_clipboard_content_s* content, size_t count, bool) {
-                    if (!content || count == 0) return;
-                    const char* text = content[0].data;
-                    if (!text) return;
-                    int wlen = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
-                    if (wlen <= 0) return;
+                    if (!content || count == 0 || !content[0].data) return;
                     HWND hwnd = g_mainWindow ? g_mainWindow->m_hwnd : nullptr;
-                    if (OpenClipboard(hwnd)) {
-                        EmptyClipboard();
-                        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, wlen * sizeof(wchar_t));
-                        if (hMem) {
-                            wchar_t* dest = static_cast<wchar_t*>(GlobalLock(hMem));
-                            MultiByteToWideChar(CP_UTF8, 0, text, -1, dest, wlen);
-                            GlobalUnlock(hMem);
-                            SetClipboardData(CF_UNICODETEXT, hMem);
-                        }
-                        CloseClipboard();
-                    }
+                    Clipboard::writeText(hwnd, content[0].data);
                 };
                 // TODO: ghostty doesn't call close_surface_cb on shell exit (see ghostty#34)
                 rtConfig.close_surface_cb = [](void*, bool) {};
