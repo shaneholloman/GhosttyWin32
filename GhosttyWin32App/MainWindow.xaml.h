@@ -33,6 +33,7 @@ namespace winrt::GhosttyWin32::implementation
         winrt::Windows::UI::Text::Core::CoreTextEditContext m_editContext{ nullptr };
         bool m_composing = false;
         std::wstring m_imeBuffer;
+        int32_t m_imeBaseOffset = 0;  // accumulated context position offset
         std::vector<std::unique_ptr<TabSession>> m_sessions;
     };
 }

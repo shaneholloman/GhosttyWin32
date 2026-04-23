@@ -52,21 +52,32 @@ namespace winrt::GhosttyWin32::implementation
                 m_editContext.InputScope(txtCore::CoreTextInputScope::Default);
 
                 m_editContext.TextRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextTextRequestedEventArgs const& args) {
-                    args.Request().Text(winrt::hstring(m_imeBuffer));
+                    // Context may ask for text at accumulated positions.
+                    // Prepend empty padding so positions align.
+                    std::wstring padded(m_imeBaseOffset, L' ');
+                    padded += m_imeBuffer;
+                    args.Request().Text(winrt::hstring(padded));
                 });
 
                 m_editContext.SelectionRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextSelectionRequestedEventArgs const& args) {
-                    int32_t end = static_cast<int32_t>(m_imeBuffer.size());
-                    args.Request().Selection({ end, end });
+                    int32_t pos = m_imeBaseOffset + static_cast<int32_t>(m_imeBuffer.size());
+                    args.Request().Selection({ pos, pos });
                 });
 
                 m_editContext.TextUpdating([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextTextUpdatingEventArgs const& args) {
                     auto range = args.Range();
                     auto newText = args.Text();
+
+                    // Translate context positions to local buffer positions
+                    int32_t localStart = range.StartCaretPosition - m_imeBaseOffset;
+                    int32_t localEnd = range.EndCaretPosition - m_imeBaseOffset;
                     int32_t bufLen = static_cast<int32_t>(m_imeBuffer.size());
-                    int32_t start = std::clamp(range.StartCaretPosition, 0, bufLen);
-                    int32_t end = std::clamp(range.EndCaretPosition, start, bufLen);
-                    m_imeBuffer.replace(start, end - start, newText.c_str(), newText.size());
+
+                    // Clamp to valid range
+                    localStart = std::clamp(localStart, 0, bufLen);
+                    localEnd = std::clamp(localEnd, localStart, bufLen);
+
+                    m_imeBuffer.replace(localStart, localEnd - localStart, newText.c_str(), newText.size());
 
                     auto* sess = ActiveSession();
                     if (!sess || !sess->surface) return;
@@ -108,6 +119,7 @@ namespace winrt::GhosttyWin32::implementation
                         if (m_app) ghostty_app_tick(m_app);
                         ghostty_surface_refresh(sess->surface);
                     }
+                    m_imeBaseOffset += static_cast<int32_t>(m_imeBuffer.size());
                     m_imeBuffer.clear();
                 });
 
@@ -128,6 +140,7 @@ namespace winrt::GhosttyWin32::implementation
                     if (m_composing) {
                         m_composing = false;
                         m_imeBuffer.clear();
+                        m_imeBaseOffset = 0;
                         auto* sess = ActiveSession();
                         if (sess && sess->surface)
                             ghostty_surface_preedit(sess->surface, nullptr, 0);
@@ -594,8 +607,11 @@ namespace winrt::GhosttyWin32::implementation
             CreateThread(nullptr, 4 * 1024 * 1024,
                 [](LPVOID param) -> DWORD {
                     auto* c = static_cast<SurfContext*>(param);
+                    LARGE_INTEGER freq, t0, t1, t2, t3;
+                    QueryPerformanceFrequency(&freq);
+                    QueryPerformanceCounter(&t0);
 
-                    // Create device (heavy — ~50-100ms)
+                    // Create device
                     UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED
                                | D3D11_CREATE_DEVICE_BGRA_SUPPORT
                                | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
@@ -605,6 +621,7 @@ namespace winrt::GhosttyWin32::implementation
                     D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
                     D3D11CreateDevice(c->adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
                         levels, 1, D3D11_SDK_VERSION, &c->device, nullptr, nullptr);
+                    QueryPerformanceCounter(&t1);
                     if (!c->device) return 1;
 
                     // Create swap chain
@@ -621,6 +638,7 @@ namespace winrt::GhosttyWin32::implementation
                     scd.Scaling = DXGI_SCALING_STRETCH;
                     scd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
                     c->factory->CreateSwapChainForComposition(c->device, &scd, nullptr, &c->swapChain);
+                    QueryPerformanceCounter(&t2);
                     if (!c->swapChain) return 1;
 
                     // Create ghostty surface
@@ -632,6 +650,15 @@ namespace winrt::GhosttyWin32::implementation
                     UINT dpi = GetDpiForWindow(c->hwnd);
                     cfg.scale_factor = (double)dpi / 96.0;
                     c->surface = ghostty_surface_new(c->app, &cfg);
+                    QueryPerformanceCounter(&t3);
+
+                    char buf[256];
+                    sprintf_s(buf, "[Ghostty] Timing: device=%lldms swapchain=%lldms surface=%lldms total=%lldms\n",
+                        (t1.QuadPart - t0.QuadPart) * 1000 / freq.QuadPart,
+                        (t2.QuadPart - t1.QuadPart) * 1000 / freq.QuadPart,
+                        (t3.QuadPart - t2.QuadPart) * 1000 / freq.QuadPart,
+                        (t3.QuadPart - t0.QuadPart) * 1000 / freq.QuadPart);
+                    OutputDebugStringA(buf);
                     return 0;
                 }, ctx, 0, nullptr);
 
@@ -654,8 +681,10 @@ namespace winrt::GhosttyWin32::implementation
 
                 ShowWindow(hwnd, SW_SHOW);
 
-                if (g_mainWindow && g_mainWindow->m_editContext)
+                if (g_mainWindow && g_mainWindow->m_editContext) {
+                    g_mainWindow->m_imeBaseOffset = 0;
                     g_mainWindow->m_editContext.NotifyFocusEnter();
+                }
 
 
                 auto surface = ctx->surface;
