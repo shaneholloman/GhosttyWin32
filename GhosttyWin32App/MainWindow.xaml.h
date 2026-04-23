@@ -5,6 +5,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <vector>
+#include "ImeBuffer.h"
 
 namespace winrt::GhosttyWin32::implementation
 {
@@ -31,9 +32,7 @@ namespace winrt::GhosttyWin32::implementation
         IDXGIFactory2* m_dxgiFactory = nullptr;
         IDXGIAdapter* m_dxgiAdapter = nullptr;
         winrt::Windows::UI::Text::Core::CoreTextEditContext m_editContext{ nullptr };
-        bool m_composing = false;
-        std::wstring m_imeBuffer;
-        int32_t m_imeBaseOffset = 0;  // accumulated context position offset
+        ImeBuffer m_ime;
         std::vector<std::unique_ptr<TabSession>> m_sessions;
     };
 }
