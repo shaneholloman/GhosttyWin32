@@ -4,6 +4,9 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="GhosttyTests/GhosttyTests.vcxproj" Id="265c76cb-58a2-4632-b6fe-ec5093b04d10">
+    <Platform Solution="*|ARM64" Project="x64" />
+  </Project>
   <Project Path="GhosttyWin32 (Package)/GhosttyWin32 (Package).wapproj" Type="c7167f0d-bc9f-4e6e-afe1-012c56b48db5">
     <Deploy />
   </Project>
