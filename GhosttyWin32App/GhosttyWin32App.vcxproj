@@ -120,6 +120,9 @@
     <Manifest Include="app.manifest" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Encoding.h" />
+    <ClInclude Include="ImeBuffer.h" />
+    <ClInclude Include="KeyModifiers.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="App.xaml.h">
       <DependentUpon>App.xaml</DependentUpon>
