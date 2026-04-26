@@ -5,10 +5,26 @@
 #include <dcomp.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
+#include <winrt/Microsoft.UI.Dispatching.h>
+#include <atomic>
+#include <memory>
 
 #pragma comment(lib, "dcomp.lib")
 
 namespace winrt::GhosttyWin32::implementation {
+
+// Pending UI-thread "attach this swap chain handle to the panel" request.
+// Created on the UI thread inside Tab::Create, kept alive by both the Tab
+// (so it can cancel on teardown) and the renderer-thread callback (so it
+// survives the cross-thread hop). The cancelled flag is the lifetime
+// interlock: ~Tab sets it before the swap chain is destroyed; the queued
+// SetSwapChainHandle bails on it before touching the (now dead) handle.
+struct SwapChainAttachRequest {
+    HANDLE handle{ nullptr };
+    Microsoft::UI::Xaml::Controls::SwapChainPanel panel{ nullptr };
+    Microsoft::UI::Dispatching::DispatcherQueue dispatcher{ nullptr };
+    std::atomic<bool> cancelled{ false };
+};
 
 // One terminal tab. Existence implies fully-formed: panel attached to a
 // composition surface, ghostty surface created, SizeChanged hooked.
@@ -20,6 +36,11 @@ namespace winrt::GhosttyWin32::implementation {
 class Tab {
 public:
     ~Tab() {
+        // Cancel the pending SetSwapChainHandle dispatch before we tear
+        // down the swap chain — otherwise the queued call could attach a
+        // freed handle to the panel after we've destroyed everything.
+        if (m_attachRequest) m_attachRequest->cancelled.store(true);
+
         if (m_panel) {
             if (m_sizeChangedToken.value != 0) {
                 m_panel.SizeChanged(m_sizeChangedToken);
@@ -47,11 +68,19 @@ public:
     }
 
     // Factory: given an already-loaded panel + item, do the failable
-    // orchestration (handle creation, panel attachment, ghostty surface
-    // creation) and return a fully-formed Tab. Returns nullptr on failure
-    // (after cleaning up any partially-acquired resources). Must be called
-    // on the UI thread inside panel.Loaded so SetSwapChainHandle has a
-    // valid composition tree.
+    // orchestration (handle creation, ghostty surface creation, swap-chain
+    // attach scheduling) and return a fully-formed Tab. Returns nullptr on
+    // failure (after cleaning up any partially-acquired resources). Must be
+    // called on the UI thread inside panel.Loaded so DispatcherQueue() is
+    // valid and SetSwapChainHandle has a real composition tree to attach to.
+    //
+    // Ordering: the DComp surface handle is bound to the panel only AFTER
+    // ghostty's renderer thread creates the swap chain that publishes to it
+    // — see OnSwapChainReady. This matches the order Microsoft documents
+    // and Windows Terminal's AtlasEngine implements (handle → swap chain →
+    // SetSwapChainHandle). Calling SetSwapChainHandle before the swap chain
+    // exists works in practice but appears to trigger NVIDIA driver crashes
+    // under tab-churn stress.
     static std::unique_ptr<Tab> Create(
         Microsoft::UI::Xaml::Controls::SwapChainPanel panel,
         Microsoft::UI::Xaml::Controls::TabViewItem item,
@@ -66,17 +95,20 @@ public:
             return nullptr;
         }
 
-        auto native2 = panel.try_as<ISwapChainPanelNative2>();
-        if (!native2 || FAILED(native2->SetSwapChainHandle(handle))) {
-            OutputDebugStringA("Tab::Create: SetSwapChainHandle FAILED\n");
-            CloseHandle(handle);
-            return nullptr;
-        }
+        auto attach = std::make_shared<SwapChainAttachRequest>();
+        attach->handle = handle;
+        attach->panel = panel;
+        attach->dispatcher = panel.DispatcherQueue();
+        // Heap-allocated owning shared_ptr handed to ghostty; it'll come back
+        // through OnSwapChainReady (or be deleted here if surface_new fails).
+        auto* attachOwned = new std::shared_ptr<SwapChainAttachRequest>(attach);
 
         ghostty_surface_config_s cfg = ghostty_surface_config_new();
         cfg.platform_tag = GHOSTTY_PLATFORM_WINDOWS;
         cfg.platform.windows.hwnd = hwnd;
         cfg.platform.windows.composition_surface_handle = handle;
+        cfg.platform.windows.swap_chain_ready_cb = &OnSwapChainReady;
+        cfg.platform.windows.swap_chain_ready_userdata = attachOwned;
         // Pass the panel's actual layout size so ghostty creates the swap
         // chain at the final size — saves an immediate ResizeBuffers on the
         // first frame and reduces driver allocator stress over many tabs.
@@ -88,17 +120,21 @@ public:
         ghostty_surface_t surface = ghostty_surface_new(app, &cfg);
         if (!surface) {
             OutputDebugStringA("Tab::Create: ghostty_surface_new FAILED\n");
-            native2->SetSwapChainHandle(nullptr);
+            // Callback won't fire — release the renderer's owning handle.
+            delete attachOwned;
             CloseHandle(handle);
             return nullptr;
         }
 
         try {
             // Private constructor — std::make_unique can't see it, so use new.
-            return std::unique_ptr<Tab>(new Tab(std::move(panel), std::move(item), handle, surface));
+            return std::unique_ptr<Tab>(new Tab(std::move(panel), std::move(item), handle, surface, std::move(attach)));
         } catch (winrt::hresult_error const&) {
+            // Tab construction failed but the renderer thread may already
+            // have fired (or be about to fire) OnSwapChainReady. Cancel
+            // first, then tear down what we have.
+            attach->cancelled.store(true);
             ghostty_surface_free(surface);
-            native2->SetSwapChainHandle(nullptr);
             CloseHandle(handle);
             return nullptr;
         }
@@ -111,11 +147,13 @@ private:
     Tab(Microsoft::UI::Xaml::Controls::SwapChainPanel panel,
         Microsoft::UI::Xaml::Controls::TabViewItem item,
         HANDLE surfaceHandle,
-        ghostty_surface_t surface)
+        ghostty_surface_t surface,
+        std::shared_ptr<SwapChainAttachRequest> attachRequest)
         : m_panel(std::move(panel))
         , m_item(std::move(item))
         , m_surfaceHandle(surfaceHandle)
         , m_surface(surface)
+        , m_attachRequest(std::move(attachRequest))
     {
         if (!m_panel || !m_item || !m_surfaceHandle || !m_surface) {
             throw winrt::hresult_error(E_INVALIDARG, L"Tab: missing resource");
@@ -132,11 +170,32 @@ private:
             });
     }
 
+    // Renderer-thread callback from ghostty: the swap chain is now bound to
+    // our surface handle, so it's safe to call SetSwapChainHandle. We only
+    // hop to the UI thread and queue the actual API call — keep this fast.
+    static void OnSwapChainReady(void* userdata) noexcept {
+        auto* raw = reinterpret_cast<std::shared_ptr<SwapChainAttachRequest>*>(userdata);
+        std::shared_ptr<SwapChainAttachRequest> req = *raw;
+        delete raw;
+        if (!req || !req->dispatcher) return;
+        try {
+            req->dispatcher.TryEnqueue([req]() {
+                if (req->cancelled.load()) return;
+                if (auto native2 = req->panel.try_as<ISwapChainPanelNative2>()) {
+                    native2->SetSwapChainHandle(req->handle);
+                }
+            });
+        } catch (...) {
+            // Window torn down — request is implicitly cancelled.
+        }
+    }
+
     Microsoft::UI::Xaml::Controls::SwapChainPanel m_panel{ nullptr };
     Microsoft::UI::Xaml::Controls::TabViewItem m_item{ nullptr };
     HANDLE m_surfaceHandle{ nullptr };
     ghostty_surface_t m_surface{ nullptr };
     winrt::event_token m_sizeChangedToken{};
+    std::shared_ptr<SwapChainAttachRequest> m_attachRequest;
 };
 
 }  // namespace winrt::GhosttyWin32::implementation
