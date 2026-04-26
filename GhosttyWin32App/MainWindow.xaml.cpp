@@ -117,7 +117,7 @@ namespace winrt::GhosttyWin32::implementation
                                 ghostty_surface_preedit(tab->Surface(), utf8.c_str(), utf8.size());
                         }
                     }
-                    if (m_app) ghostty_app_tick(m_app);
+                    if (m_ghostty) m_ghostty->Tick();
                     ghostty_surface_refresh(tab->Surface());
                 });
 
@@ -133,7 +133,7 @@ namespace winrt::GhosttyWin32::implementation
                         if (!utf8.empty()) {
                             ghostty_surface_text(tab->Surface(), utf8.c_str(), utf8.size());
                         }
-                        if (m_app) ghostty_app_tick(m_app);
+                        if (m_ghostty) m_ghostty->Tick();
                         ghostty_surface_refresh(tab->Surface());
                     }
                     m_ime.compositionCompleted();
@@ -204,7 +204,7 @@ namespace winrt::GhosttyWin32::implementation
                     if (!utf8.empty()) {
                         ghostty_surface_text(tab->Surface(), utf8.c_str(), utf8.size());
                     }
-                    if (m_app) ghostty_app_tick(m_app);
+                    if (m_ghostty) m_ghostty->Tick();
                     ghostty_surface_refresh(tab->Surface());
                     args.Handled(true);
                     return;
@@ -231,7 +231,7 @@ namespace winrt::GhosttyWin32::implementation
                     }
                 }
 
-                if (m_app) ghostty_app_tick(m_app);
+                if (m_ghostty) m_ghostty->Tick();
                 ghostty_surface_refresh(tab->Surface());
                 args.Handled(true);
             });
@@ -337,9 +337,8 @@ namespace winrt::GhosttyWin32::implementation
 
     MainWindow::~MainWindow()
     {
-        m_tabs.Clear();  // Tab destructors handle cleanup
-        if (m_app) ghostty_app_free(m_app);
-        if (m_config) ghostty_config_free(m_config);
+        m_tabs.Clear();   // Tab destructors handle cleanup
+        m_ghostty.reset(); // ghostty_app_free + config_free in correct order
         // Clean shutdown reached — clear the crash flag so the next launch
         // doesn't pause unnecessarily.
         std::error_code ec;
@@ -380,102 +379,91 @@ namespace winrt::GhosttyWin32::implementation
 
     void MainWindow::InitGhostty()
     {
-        struct Args { MainWindow* self; };
-        Args args{ this };
-        HANDLE hThread = CreateThread(nullptr, 4 * 1024 * 1024,
-            [](LPVOID param) -> DWORD {
-                auto* a = static_cast<Args*>(param);
-                ghostty_init(0, nullptr);
-                ghostty_runtime_config_s rtConfig{};
-                rtConfig.userdata = a->self;
-                rtConfig.wakeup_cb = [](void*) {
-                    if (!g_mainWindow || !g_mainWindow->m_app) return;
-                    g_mainWindow->DispatcherQueue().TryEnqueue([]() {
-                        if (g_mainWindow && g_mainWindow->m_app) {
-                            ghostty_app_tick(g_mainWindow->m_app);
-                        }
-                    });
-                };
-                rtConfig.action_cb = [](ghostty_app_t, ghostty_target_s target, ghostty_action_s action) -> bool {
-                    if ((action.tag == GHOSTTY_ACTION_SET_TITLE || action.tag == GHOSTTY_ACTION_SET_TAB_TITLE)
-                        && target.tag == GHOSTTY_TARGET_SURFACE) {
-                        const char* title = action.action.set_title.title;
-                        auto surface = target.target.surface;
-                        if (title && g_mainWindow) {
-                            auto wstr = std::make_shared<std::wstring>(Encoding::toUtf16(title));
-                            if (!wstr->empty()) {
-                                auto mw = g_mainWindow;
-                                mw->DispatcherQueue().TryEnqueue([mw, wstr, surface]() {
-                                    if (auto* t = mw->m_tabs.FindBySurface(surface)) {
-                                        t->Item().Header(box_value(winrt::hstring(*wstr)));
-                                    }
-                                });
+        ghostty_runtime_config_s rtConfig{};
+        rtConfig.userdata = this;
+        rtConfig.wakeup_cb = [](void*) {
+            if (!g_mainWindow || !g_mainWindow->m_ghostty) return;
+            g_mainWindow->DispatcherQueue().TryEnqueue([]() {
+                if (g_mainWindow && g_mainWindow->m_ghostty) {
+                    g_mainWindow->m_ghostty->Tick();
+                }
+            });
+        };
+        rtConfig.action_cb = [](ghostty_app_t, ghostty_target_s target, ghostty_action_s action) -> bool {
+            if ((action.tag == GHOSTTY_ACTION_SET_TITLE || action.tag == GHOSTTY_ACTION_SET_TAB_TITLE)
+                && target.tag == GHOSTTY_TARGET_SURFACE) {
+                const char* title = action.action.set_title.title;
+                auto surface = target.target.surface;
+                if (title && g_mainWindow) {
+                    auto wstr = std::make_shared<std::wstring>(Encoding::toUtf16(title));
+                    if (!wstr->empty()) {
+                        auto mw = g_mainWindow;
+                        mw->DispatcherQueue().TryEnqueue([mw, wstr, surface]() {
+                            if (auto* t = mw->m_tabs.FindBySurface(surface)) {
+                                t->Item().Header(box_value(winrt::hstring(*wstr)));
                             }
-                        }
+                        });
                     }
+                }
+            }
 
-                    // Title bar and tab strip color matches terminal background
-                    if (action.tag == GHOSTTY_ACTION_COLOR_CHANGE && g_mainWindow && g_mainWindow->m_hwnd) {
-                        auto& cc = action.action.color_change;
-                        if (cc.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND) {
-                            HWND hwnd = g_mainWindow->m_hwnd;
-                            COLORREF color = RGB(cc.r, cc.g, cc.b);
-                            DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &color, sizeof(color));
-                            float luminance = 0.299f * cc.r + 0.587f * cc.g + 0.114f * cc.b;
-                            COLORREF textColor = (luminance < 128) ? RGB(255, 255, 255) : RGB(0, 0, 0);
-                            DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
+            // Title bar and tab strip color matches terminal background
+            if (action.tag == GHOSTTY_ACTION_COLOR_CHANGE && g_mainWindow && g_mainWindow->m_hwnd) {
+                auto& cc = action.action.color_change;
+                if (cc.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND) {
+                    HWND hwnd = g_mainWindow->m_hwnd;
+                    COLORREF color = RGB(cc.r, cc.g, cc.b);
+                    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &color, sizeof(color));
+                    float luminance = 0.299f * cc.r + 0.587f * cc.g + 0.114f * cc.b;
+                    COLORREF textColor = (luminance < 128) ? RGB(255, 255, 255) : RGB(0, 0, 0);
+                    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
 
-                            // Update XAML background to match
-                            auto mw = g_mainWindow;
-                            uint8_t r = cc.r, g = cc.g, b = cc.b;
-                            mw->DispatcherQueue().TryEnqueue([mw, r, g, b]() {
-                                auto brush = winrt::Microsoft::UI::Xaml::Media::SolidColorBrush(
-                                    winrt::Windows::UI::Color{ 255, r, g, b });
-                                mw->Content().as<winrt::Microsoft::UI::Xaml::Controls::Panel>().Background(brush);
-                            });
-                        }
-                        return true;
-                    }
+                    // Update XAML background to match
+                    auto mw = g_mainWindow;
+                    uint8_t r = cc.r, g = cc.g, b = cc.b;
+                    mw->DispatcherQueue().TryEnqueue([mw, r, g, b]() {
+                        auto brush = winrt::Microsoft::UI::Xaml::Media::SolidColorBrush(
+                            winrt::Windows::UI::Color{ 255, r, g, b });
+                        mw->Content().as<winrt::Microsoft::UI::Xaml::Controls::Panel>().Background(brush);
+                    });
+                }
+                return true;
+            }
 
-                    return false;
-                };
-                rtConfig.read_clipboard_cb = [](void*, ghostty_clipboard_e, void* state) -> bool {
-                    if (!g_mainWindow) return false;
-                    auto* tab = g_mainWindow->ActiveTab();
-                    if (!tab || !tab->Surface()) return false;
-                    auto utf8 = Encoding::toUtf8(Clipboard::read(g_mainWindow->m_hwnd));
-                    if (utf8.empty()) return false;
-                    ghostty_surface_complete_clipboard_request(tab->Surface(), utf8.c_str(), state, false);
-                    return true;
-                };
-                rtConfig.confirm_read_clipboard_cb = [](void*, const char* content, void* state, ghostty_clipboard_request_e) {
-                    // Auto-confirm clipboard reads
-                    if (g_mainWindow) {
-                        auto* tab = g_mainWindow->ActiveTab();
-                        if (tab && tab->Surface()) {
-                            ghostty_surface_complete_clipboard_request(tab->Surface(), content, state, true);
-                        }
-                    }
-                };
-                rtConfig.write_clipboard_cb = [](void*, ghostty_clipboard_e, const ghostty_clipboard_content_s* content, size_t count, bool) {
-                    if (!content || count == 0 || !content[0].data) return;
-                    HWND hwnd = g_mainWindow ? g_mainWindow->m_hwnd : nullptr;
-                    Clipboard::write(hwnd, Encoding::toUtf16(content[0].data));
-                };
-                // TODO: ghostty doesn't call close_surface_cb on shell exit (see ghostty#34)
-                rtConfig.close_surface_cb = [](void*, bool) {};
-                a->self->m_config = ghostty_config_new();
-                ghostty_config_load_default_files(a->self->m_config);
-                ghostty_config_finalize(a->self->m_config);
-                a->self->m_app = ghostty_app_new(&rtConfig, a->self->m_config);
-                return 0;
-            }, &args, 0, nullptr);
-        if (hThread) { WaitForSingleObject(hThread, INFINITE); CloseHandle(hThread); }
+            return false;
+        };
+        rtConfig.read_clipboard_cb = [](void*, ghostty_clipboard_e, void* state) -> bool {
+            if (!g_mainWindow) return false;
+            auto* tab = g_mainWindow->ActiveTab();
+            if (!tab || !tab->Surface()) return false;
+            auto utf8 = Encoding::toUtf8(Clipboard::read(g_mainWindow->m_hwnd));
+            if (utf8.empty()) return false;
+            ghostty_surface_complete_clipboard_request(tab->Surface(), utf8.c_str(), state, false);
+            return true;
+        };
+        rtConfig.confirm_read_clipboard_cb = [](void*, const char* content, void* state, ghostty_clipboard_request_e) {
+            // Auto-confirm clipboard reads
+            if (g_mainWindow) {
+                auto* tab = g_mainWindow->ActiveTab();
+                if (tab && tab->Surface()) {
+                    ghostty_surface_complete_clipboard_request(tab->Surface(), content, state, true);
+                }
+            }
+        };
+        rtConfig.write_clipboard_cb = [](void*, ghostty_clipboard_e, const ghostty_clipboard_content_s* content, size_t count, bool) {
+            if (!content || count == 0 || !content[0].data) return;
+            HWND hwnd = g_mainWindow ? g_mainWindow->m_hwnd : nullptr;
+            Clipboard::write(hwnd, Encoding::toUtf16(content[0].data));
+        };
+        // TODO: ghostty doesn't call close_surface_cb on shell exit (see ghostty#34)
+        rtConfig.close_surface_cb = [](void*, bool) {};
+
+        m_ghostty = GhosttyApp::Create(rtConfig);
     }
 
     void MainWindow::CreateTab()
     {
-        if (!m_app || !m_hwnd) return;
+        if (!m_ghostty || !m_hwnd) return;
         auto tv = TabView();
 
         auto panel = muxc::SwapChainPanel();
@@ -491,7 +479,7 @@ namespace winrt::GhosttyWin32::implementation
         tv.TabItems().Append(item);
         tv.SelectedItem(item);
 
-        auto app = m_app;
+        auto app = m_ghostty->Handle();
         auto hwnd = m_hwnd;
         auto weakThis = get_weak();
         // Hold strong refs so the lambda can keep them alive until Loaded fires.

@@ -2,6 +2,7 @@
 
 #include "MainWindow.g.h"
 #include "ghostty.h"
+#include "GhosttyApp.h"
 #include "ImeBuffer.h"
 #include "Tab.h"
 #include "Tabs.h"
@@ -25,8 +26,7 @@ namespace winrt::GhosttyWin32::implementation
         void CreateTab();
         Tab* ActiveTab();
 
-        ghostty_app_t m_app = nullptr;
-        ghostty_config_t m_config = nullptr;
+        std::unique_ptr<GhosttyApp> m_ghostty;
         HWND m_hwnd = nullptr;
         winrt::Windows::UI::Text::Core::CoreTextEditContext m_editContext{ nullptr };
         ImeBuffer m_ime;
