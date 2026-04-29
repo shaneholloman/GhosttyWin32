@@ -96,7 +96,9 @@ public:
         Microsoft::UI::Xaml::Controls::TabViewItem item,
         ghostty_app_t app,
         HWND hwnd,
-        std::function<void()> onActivated = {})
+        std::function<void()> onActivated = {},
+        uint32_t initialWidth = 0,
+        uint32_t initialHeight = 0)
     {
         constexpr DWORD COMPOSITIONSURFACE_ALL_ACCESS = 0x0003L;
 
@@ -121,11 +123,22 @@ public:
         cfg.platform.windows.composition_surface_handle = handle;
         cfg.platform.windows.swap_chain_ready_cb = &OnSwapChainReady;
         cfg.platform.windows.swap_chain_ready_userdata = attachOwned;
-        // Pass the panel's actual layout size so ghostty creates the swap
-        // chain at the final size — saves an immediate ResizeBuffers on the
-        // first frame and reduces driver allocator stress over many tabs.
-        cfg.platform.windows.initial_width = static_cast<uint32_t>(panel.ActualWidth());
-        cfg.platform.windows.initial_height = static_cast<uint32_t>(panel.ActualHeight());
+        // Initial swap chain size: prefer the host's caller-supplied estimate
+        // (typically the active tab's panel size, since the new panel will
+        // land in the same TabView content area), then fall back to the
+        // panel's own ActualWidth/Height. With deferred SelectedItem (issue
+        // #22) the panel isn't in the visual tree yet so its ActualWidth is
+        // 0 — without the host hint, ghostty would fall back further to the
+        // main window's full client rect, which is taller than the actual
+        // panel area by the tab strip height. That mismatch causes a
+        // visible "stretch then resize" when the panel becomes visible
+        // and SizeChanged fires.
+        uint32_t initW = initialWidth ? initialWidth
+                                      : static_cast<uint32_t>(panel.ActualWidth());
+        uint32_t initH = initialHeight ? initialHeight
+                                       : static_cast<uint32_t>(panel.ActualHeight());
+        cfg.platform.windows.initial_width = initW;
+        cfg.platform.windows.initial_height = initH;
         UINT dpi = GetDpiForWindow(hwnd);
         cfg.scale_factor = static_cast<double>(dpi) / 96.0;
 

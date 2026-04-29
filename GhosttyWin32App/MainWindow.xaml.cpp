@@ -518,6 +518,21 @@ namespace winrt::GhosttyWin32::implementation
             if (self->m_hwnd) ShowWindow(self->m_hwnd, SW_SHOW);
         };
 
+        // Estimate the new panel's eventual size from the currently active
+        // tab. Both panels live in the same TabView content area, so the
+        // active tab's ActualWidth/Height is exactly what the new panel
+        // will lay out to once it becomes visible. Passing this lets
+        // ghostty create the swap chain at the right size from the start
+        // — without it, the new panel's ActualWidth is 0 (deferred
+        // SelectedItem) and ghostty falls back to the main window's full
+        // client rect, which is too tall by the tab strip height.
+        uint32_t initialW = 0, initialH = 0;
+        if (auto* prev = ActiveTab()) {
+            auto const& prevPanel = prev->Panel();
+            initialW = static_cast<uint32_t>(prevPanel.ActualWidth());
+            initialH = static_cast<uint32_t>(prevPanel.ActualHeight());
+        }
+
         // Wrap Tab::Create in SEH guard so a hardware exception in the
         // NVIDIA driver during ghostty_surface_new (e.g. dx_create_texture
         // crash) doesn't kill the whole app and take every other tab
@@ -530,12 +545,14 @@ namespace winrt::GhosttyWin32::implementation
             ghostty_app_t app;
             HWND hwnd;
             std::function<void()> onActivated;
+            uint32_t initialWidth;
+            uint32_t initialHeight;
             std::unique_ptr<Tab> result;
         };
-        CreateCtx ctx{ &panel, &item, app, hwnd, std::move(onActivated), nullptr };
+        CreateCtx ctx{ &panel, &item, app, hwnd, std::move(onActivated), initialW, initialH, nullptr };
         int ok = RunSEHGuarded([](void* arg) noexcept {
             auto* c = static_cast<CreateCtx*>(arg);
-            c->result = Tab::Create(*c->panel, *c->item, c->app, c->hwnd, std::move(c->onActivated));
+            c->result = Tab::Create(*c->panel, *c->item, c->app, c->hwnd, std::move(c->onActivated), c->initialWidth, c->initialHeight);
         }, &ctx);
 
         std::unique_ptr<Tab> tab = std::move(ctx.result);
