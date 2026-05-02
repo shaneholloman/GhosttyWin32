@@ -16,8 +16,14 @@
                  VerticalAlignment="Stretch"
                  HorizontalAlignment="Stretch">
             <TabView.TabStripFooter>
+                <!-- Stretch fills the remaining strip width after tabs + [+],
+                     so the drag region naturally shrinks as more tabs are
+                     opened and grows back when tabs are closed. The MinWidth
+                     stops it from collapsing under the system caption buttons
+                     (~138px) — 200px keeps ~62px of usable drag area visible
+                     to the left of the buttons even when the strip is full. -->
                 <Border x:Name="DragRegion" Background="Transparent"
-                        HorizontalAlignment="Stretch" MinWidth="48" />
+                        HorizontalAlignment="Stretch" MinWidth="200" />
             </TabView.TabStripFooter>
         </TabView>
     </Grid>
