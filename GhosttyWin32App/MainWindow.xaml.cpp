@@ -70,6 +70,34 @@ namespace winrt::GhosttyWin32::implementation
             if (windowNative) windowNative->get_WindowHandle(&m_hwnd);
             if (m_hwnd) ShowWindow(m_hwnd, SW_HIDE);
 
+            // Remove the OS title bar (and with it the system caption
+            // buttons) so only our XAML CaptionButtons render at the top.
+            //
+            // We tried two cheaper alternatives first and both failed in
+            // WinUI 3 1.8:
+            //   * AppWindowTitleBar.Button*Color set to transparent — the
+            //     glyphs still rendered.
+            //   * Subclassing WM_NCCALCSIZE / WM_NCHITTEST (the Windows
+            //     Terminal NonClientIslandWindow pattern) — removes the
+            //     Win32 NC frame but the WinUI compositor keeps drawing
+            //     the caption buttons via AppWindowTitleBar, and tab
+            //     creation re-triggers that draw, leaving multiple sets
+            //     stacked on top of each other.
+            // Only OverlappedPresenter::SetBorderAndTitleBar reliably
+            // tells the presenter "no title bar" so the buttons go away.
+            //
+            // Issue #26 cautioned against OverlappedPresenter state
+            // transitions because dynamically toggling them tripped an
+            // NVIDIA driver AV (nvwgf2umx.dll Present). We set it once
+            // here, before the first frame renders, so the renderer
+            // never sees a transition; the crash flag + 2-second startup
+            // recovery in App.cpp remains as a safety net if this ever
+            // regresses.
+            if (auto presenter = AppWindow().Presenter().try_as<
+                    winrt::Microsoft::UI::Windowing::OverlappedPresenter>()) {
+                presenter.SetBorderAndTitleBar(true, false);
+            }
+
             // Follow OS theme + Mica backdrop
             {
                 auto settings = winrt::Windows::UI::ViewManagement::UISettings();
@@ -180,9 +208,6 @@ namespace winrt::GhosttyWin32::implementation
 
             auto tv = TabView();
             SetTitleBar(DragRegion());
-
-
-
 
             // Window-level input handling (same approach as Windows Terminal)
             auto root = Content().as<winrt::Microsoft::UI::Xaml::UIElement>();
@@ -327,6 +352,18 @@ namespace winrt::GhosttyWin32::implementation
                         }
                     }
                 });
+                // Track window state so the maximize button glyph swaps
+                // between Maximize (E922) and Restore (E923). DidSizeChange
+                // covers the SC_MAXIMIZE / SC_RESTORE round trip we send
+                // from the XAML click handlers; DidPresenterChange covers
+                // anything that swaps the presenter type.
+                AppWindow().Changed([this](auto&&,
+                    winrt::Microsoft::UI::Windowing::AppWindowChangedEventArgs const& args) {
+                    if (args.DidPresenterChange() || args.DidSizeChange()) {
+                        UpdateMaximizeGlyph();
+                    }
+                });
+                UpdateMaximizeGlyph();
             });
 
             tv.AddTabButtonClick([this](muxc::TabView const&, auto&&) {
@@ -594,4 +631,47 @@ namespace winrt::GhosttyWin32::implementation
         // presented its first frame.
         m_tabs.Add(std::move(tab));
     }
+
+    // Caption button click handlers. We route through Win32 messages
+    // rather than OverlappedPresenter state changes (which tripped the
+    // NVIDIA driver crash in issue #26). The OS handles min/max/restore
+    // through its standard NCA path and we just observe the result via
+    // AppWindow.Changed → UpdateMaximizeGlyph.
+
+    void MainWindow::OnMinimizeClick(winrt::Windows::Foundation::IInspectable const&,
+                                     winrt::Microsoft::UI::Xaml::RoutedEventArgs const&)
+    {
+        if (m_hwnd) ShowWindow(m_hwnd, SW_MINIMIZE);
+    }
+
+    void MainWindow::OnMaximizeClick(winrt::Windows::Foundation::IInspectable const&,
+                                     winrt::Microsoft::UI::Xaml::RoutedEventArgs const&)
+    {
+        if (!m_hwnd) return;
+        SendMessageW(m_hwnd, WM_SYSCOMMAND,
+                     IsZoomed(m_hwnd) ? SC_RESTORE : SC_MAXIMIZE, 0);
+    }
+
+    void MainWindow::OnCloseClick(winrt::Windows::Foundation::IInspectable const&,
+                                  winrt::Microsoft::UI::Xaml::RoutedEventArgs const&)
+    {
+        // Route through WM_CLOSE so any registered close hooks run; the
+        // window's own Close() shortcut would skip them.
+        if (m_hwnd) PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
+        else this->Close();
+    }
+
+    void MainWindow::UpdateMaximizeGlyph()
+    {
+        if (!m_hwnd) return;
+        // E922 = ChromeMaximize (□), E923 = ChromeRestore (❐).
+        wchar_t const* glyph = IsZoomed(m_hwnd) ? L"\xE923" : L"\xE922";
+        try {
+            MaximizeGlyph().Glyph(glyph);
+        } catch (winrt::hresult_error const&) {
+            // XAML may not have finished loading the named element yet;
+            // the next Changed/SizeChanged tick will retry.
+        }
+    }
+
 }
