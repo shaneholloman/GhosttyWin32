@@ -11,6 +11,12 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+
+    # Restrict secret access to tag pushes only. The Environment can also be
+    # configured in repo settings to require manual approval before signing
+    # secrets are released — see docs/release.md.
+    environment: release
+
     steps:
       - name: Checkout GhosttyWin32
         uses: actions/checkout@v4
@@ -19,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: i999rri/ghostty
-          ref: windows-port
+          ref: feature/swapchain-panel-api
           path: ghostty
 
       - name: Setup Zig
@@ -32,9 +38,13 @@ jobs:
         run: |
           cd ghostty
           zig build -Doptimize=ReleaseSafe -Drenderer=directx
+          # GhosttyWin32App.vcxproj links against ../ghostty/ghostty.{dll,lib,h}
+          # at the workspace root; copy the canonical artifacts there.
           Copy-Item zig-out/lib/ghostty.dll ../ghostty/
           Copy-Item include/ghostty.h ../ghostty/
-          # Find import library (small ~60KB, in zig-cache or local cache)
+          # The Zig build writes the small import lib into the cache, not
+          # zig-out. Hunt for the most recently produced one (~60 KB) and
+          # copy it next to the dll.
           $searchPaths = @(".")
           if ($env:ZIG_LOCAL_CACHE_DIR) { $searchPaths += $env:ZIG_LOCAL_CACHE_DIR }
           if (Test-Path "$env:LOCALAPPDATA\zig") { $searchPaths += "$env:LOCALAPPDATA\zig" }
@@ -53,33 +63,106 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build GhosttyWin32.exe
-        run: |
-          msbuild GhosttyWin32.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-      - name: Download Mesa Zink
-        shell: bash
+      - name: Restore NuGet packages
+        run: nuget restore GhosttyWin32.sln
+
+      - name: Set MSIX version from tag
+        shell: pwsh
         run: |
-          MESA_VERSION=$(gh release list -R pal1000/mesa-dist-win -L 1 --json tagName -q '.[0].tagName')
-          gh release download "$MESA_VERSION" -R pal1000/mesa-dist-win -p "mesa3d-*-release-msvc.7z" -D .
-          7z x mesa3d-*-release-msvc.7z -omesa -y
-          cp mesa/x64/opengl32.dll x64/Release/
-          cp mesa/x64/libgallium_wgl.dll x64/Release/
+          # Tag "vX.Y.Z" -> manifest Version "X.Y.Z.0". Strip any -rcN / -beta
+          # suffix because appxmanifest only accepts a four-part numeric.
+          $tag = "${{ github.ref_name }}"
+          $version = ($tag.TrimStart('v') -split '-')[0]
+          $fullVersion = "$version.0"
+          $manifestPath = "GhosttyWin32 (Package)/Package.appxmanifest"
+          (Get-Content $manifestPath) `
+            -replace 'Version="[\d\.]+"', "Version=`"$fullVersion`"" |
+            Set-Content $manifestPath -NoNewline
+          Write-Host "Set MSIX version to $fullVersion"
+          # Echo for downstream steps.
+          "msix_version=$fullVersion" >> $env:GITHUB_ENV
+          "release_version=$version" >> $env:GITHUB_ENV
+
+      - name: Decode signing certificate
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Package
-        shell: bash
+          PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
         run: |
-          mkdir -p GhosttyWin32
-          cp x64/Release/GhosttyWin32.exe GhosttyWin32/
-          cp x64/Release/ghostty.dll GhosttyWin32/
-          cp x64/Release/opengl32.dll GhosttyWin32/
-          cp x64/Release/libgallium_wgl.dll GhosttyWin32/
-          7z a GhosttyWin32-${{ github.ref_name }}-x64.zip GhosttyWin32/
+          if (-not $env:PFX_BASE64) {
+            Write-Error "SIGNING_PFX_BASE64 secret is empty. See docs/release.md for setup."
+            exit 1
+          }
+          $pfxBytes = [System.Convert]::FromBase64String($env:PFX_BASE64)
+          [System.IO.File]::WriteAllBytes("ghostty-signing.pfx", $pfxBytes)
+
+      - name: Build MSIX package
+        shell: pwsh
+        env:
+          PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          $pfxPath = (Resolve-Path "ghostty-signing.pfx").Path
+          msbuild "GhosttyWin32 (Package)/GhosttyWin32 (Package).wapproj" `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:PlatformToolset=v143 `
+            /p:GenerateAppxPackageOnBuild=true `
+            /p:AppxPackageSigningEnabled=true `
+            /p:PackageCertificateKeyFile=$pfxPath `
+            /p:PackageCertificatePassword=$env:PFX_PASSWORD `
+            /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never
+
+      - name: Cleanup PFX
+        if: always()
+        shell: pwsh
+        run: Remove-Item ghostty-signing.pfx -ErrorAction SilentlyContinue
+
+      - name: Locate and rename MSIX
+        id: locate
+        shell: pwsh
+        run: |
+          $msix = Get-ChildItem -Recurse -Filter "*.msix" -Path "GhosttyWin32 (Package)/AppPackages" |
+                  Where-Object { $_.Name -notlike "*Microsoft.*" } |
+                  Select-Object -First 1
+          if (-not $msix) {
+            Write-Error "Built MSIX not found under AppPackages/"
+            exit 1
+          }
+          $renamed = "Ghostty-$env:release_version-x64.msix"
+          Copy-Item $msix.FullName $renamed
+          Write-Host "Release artifact: $renamed (from $($msix.FullName))"
+          "msix_path=$renamed" >> $env:GITHUB_OUTPUT
+
+      - name: Verify .cer is committed
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "Ghostty.cer")) {
+            Write-Error "Ghostty.cer not found in repo root. Commit the public cert (see docs/release.md)."
+            exit 1
+          }
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: GhosttyWin32-${{ github.ref_name }}-x64.zip
+          files: |
+            ${{ steps.locate.outputs.msix_path }}
+            Ghostty.cer
           generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### Scoop (recommended)
+            ```
+            scoop install ghostty
+            ```
+
+            ### Manual install
+            1. Download `Ghostty.cer` and `Ghostty-${{ env.release_version }}-x64.msix`
+            2. Right-click `Ghostty.cer` → Install Certificate → Local Machine →
+               Trusted People (UAC prompt will appear)
+            3. Double-click the `.msix` to install
+
+            See the README for full setup details.

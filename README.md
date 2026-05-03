@@ -94,9 +94,17 @@ Then run from terminal or start menu:
 GhosttyWin32
 ```
 
-### Manual
+### Manual (MSIX)
 
-Download the latest ZIP from [Releases](https://github.com/i999rri/GhosttyWin32/releases), extract, and run `GhosttyWin32.exe`.
+1. Download both `Ghostty-X.Y.Z-x64.msix` and `Ghostty.cer` from
+   [Releases](https://github.com/i999rri/GhosttyWin32/releases).
+2. Right-click `Ghostty.cer` → Install Certificate → **Local Machine** → place
+   in **Trusted People** (UAC prompt). This is a one-time step per machine; the
+   self-signed publisher certificate has to be trusted before Windows will
+   sideload the MSIX.
+3. Double-click the `.msix` to install.
+
+Subsequent updates only require step 3.
 
 ## Building from Source
 
@@ -113,7 +121,7 @@ This requires a forked version of Ghostty with Windows support patches:
 ```bash
 git clone https://github.com/i999rri/ghostty.git
 cd ghostty
-git switch windows-port
+git switch feature/swapchain-panel-api
 zig build -Doptimize=ReleaseSafe -Drenderer=directx
 ```
 
