@@ -3,7 +3,10 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Restrict to v<digit>... so 'vfoo' or 'v-' tags don't trigger a
+      # release run. The tag-format validation in "Set MSIX version
+      # from tag" still rejects 2-part / 5-part / non-numeric variants.
+      - 'v[0-9]*'
 
 permissions:
   contents: write
@@ -38,6 +41,8 @@ jobs:
       - name: Build ghostty.dll
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cd ghostty
           zig build -Doptimize=ReleaseSafe -Drenderer=directx
           # GhosttyWin32App.vcxproj links against ../ghostty/ghostty.{dll,lib,h}
@@ -85,10 +90,20 @@ jobs:
       - name: Set MSIX version from tag
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           # Tag "vX.Y.Z" -> manifest Version "X.Y.Z.0". Strip any -rcN / -beta
           # suffix because appxmanifest only accepts a four-part numeric.
           $tag = "${{ github.ref_name }}"
           $version = ($tag.TrimStart('v') -split '-')[0]
+          # Fail-fast on malformed tags. The MSIX manifest only accepts a
+          # 4-part numeric Version, so anything that doesn't reduce to
+          # exactly 3 numeric segments here would fail later in obscure
+          # ways. Reject up front with a clear message instead.
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "Tag '$tag' produced version '$version', which is not 3 numeric parts. Expected v<major>.<minor>.<patch> (optional -rcN / -beta suffix)."
+            exit 1
+          }
           $fullVersion = "$version.0"
           # Read with -Raw so existing line endings are preserved verbatim
           # (the previous Get-Content + Set-Content -NoNewline approach
@@ -115,6 +130,8 @@ jobs:
           PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
           PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           if (-not $env:PFX_BASE64) {
             Write-Error "SIGNING_PFX_BASE64 secret is empty. See .github/RELEASING.md."
             exit 1
@@ -140,6 +157,8 @@ jobs:
         env:
           PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $pfxPath = (Resolve-Path "ghostty-signing.pfx").Path
           msbuild "GhosttyWin32 (Package)/GhosttyWin32 (Package).wapproj" `
             /p:Configuration=Release `
@@ -163,6 +182,8 @@ jobs:
         id: locate
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $msix = Get-ChildItem -Recurse -Filter "*.msix" -Path "GhosttyWin32 (Package)/AppPackages" |
                   Where-Object { $_.Name -notlike "*Microsoft.*" } |
                   Select-Object -First 1
