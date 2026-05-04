@@ -40,15 +40,7 @@ Export-PfxCertificate `
   -Password $pwd
 ```
 
-### 3. .cer (公開鍵のみ) をエクスポート
-
-```powershell
-Export-Certificate `
-  -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" `
-  -FilePath Ghostty.cer
-```
-
-### 4. PFX を Base64 化
+### 3. PFX を Base64 化
 
 ```powershell
 $pfxBytes = [System.IO.File]::ReadAllBytes("ghostty-signing.pfx")
@@ -57,7 +49,7 @@ $pfxBase64 | Set-Clipboard
 Write-Host "PFX base64 をクリップボードにコピーしました"
 ```
 
-### 5. GitHub Secrets に登録
+### 4. GitHub Secrets に登録
 
 リポジトリ Settings → Secrets and variables → Actions → New repository secret:
 
@@ -66,7 +58,7 @@ Write-Host "PFX base64 をクリップボードにコピーしました"
 | `SIGNING_PFX_BASE64` | クリップボードに入った Base64 文字列 |
 | `SIGNING_PFX_PASSWORD` | 手順 2 で入力したパスワード |
 
-### 6. Environments を作成
+### 5. Environments を作成
 
 リリース種別ごとに Environment を分けて、production だけ手動承認を要求する構成にする。
 
@@ -96,20 +88,10 @@ Settings → Environments → New environment → 名前 `dev-release`
 
 #### Secrets の配置
 
-`SIGNING_PFX_BASE64` と `SIGNING_PFX_PASSWORD` は **両方の Environment** に登録する。
-（あるいは Repository secrets に1回だけ登録すれば両方から見える）
+Step 4 で **Repository secrets** に登録すれば両方の Environment から自動的に参照できる。
+Environment ごとに別 PFX を使いたい場合（dev/prod を別証明書にする等）のみ Environment secrets を使う。
 
-### 7. `Ghostty.cer` をリポジトリに commit
-
-```powershell
-git add Ghostty.cer
-git commit -m "Add public signing certificate"
-git push
-```
-
-公開鍵だけなので機密ではない。配布時にユーザーが取得しやすいようリポジトリに置いておく。
-
-### 8. ローカルの PFX を**安全に削除**
+### 6. ローカルの PFX を**安全に削除**
 
 `ghostty-signing.pfx` はもう不要（GitHub Secrets に入っている）。クラウド同期フォルダ等から完全に消す:
 

@@ -92,6 +92,7 @@ jobs:
         shell: pwsh
         env:
           PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
         run: |
           if (-not $env:PFX_BASE64) {
             Write-Error "SIGNING_PFX_BASE64 secret is empty. See .github/RELEASING.md."
@@ -99,6 +100,19 @@ jobs:
           }
           $pfxBytes = [System.Convert]::FromBase64String($env:PFX_BASE64)
           [System.IO.File]::WriteAllBytes("ghostty-signing.pfx", $pfxBytes)
+
+          # Derive the public cer from the PFX so the release artifact and the
+          # signing key are guaranteed to match. We don't commit Ghostty.cer
+          # because the source of truth is the PFX in Secrets — keeping a
+          # second copy in git invites drift.
+          $pfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+            (Resolve-Path "ghostty-signing.pfx").Path,
+            $env:PFX_PASSWORD,
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+          $cerBytes = $pfx.Export(
+            [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+          [System.IO.File]::WriteAllBytes("Ghostty.cer", $cerBytes)
+          $pfx.Dispose()
 
       - name: Build MSIX package
         shell: pwsh
@@ -120,7 +134,9 @@ jobs:
       - name: Cleanup PFX
         if: always()
         shell: pwsh
-        run: Remove-Item ghostty-signing.pfx -ErrorAction SilentlyContinue
+        run: |
+          Remove-Item ghostty-signing.pfx -ErrorAction SilentlyContinue
+          # Ghostty.cer (public part) stays for the release upload step.
 
       - name: Locate and rename MSIX
         id: locate
@@ -137,14 +153,6 @@ jobs:
           Copy-Item $msix.FullName $renamed
           Write-Host "Release artifact: $renamed (from $($msix.FullName))"
           "msix_path=$renamed" >> $env:GITHUB_OUTPUT
-
-      - name: Verify .cer is committed
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "Ghostty.cer")) {
-            Write-Error "Ghostty.cer not found in repo root. Commit the public cert (see .github/RELEASING.md)."
-            exit 1
-          }
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
