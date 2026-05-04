@@ -1,23 +1,27 @@
-name: Release
+name: Dev Build
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [dev]
+  workflow_dispatch: {}
 
 permissions:
   contents: write
+
+# Run-coalescing: only one dev-build is meaningful at a time. If a newer push
+# arrives while the previous build is still going, cancel the older one so we
+# don't overwrite a newer artifact with an older one when both finish.
+concurrency:
+  group: dev-build
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: windows-latest
 
-    # Pre-release tags (anything with a hyphen, e.g. v0.3.0-rc1, v0.3.0-beta1)
-    # route through the dev-release Environment which auto-approves.
-    # Production tags (v0.3.0) go through the release Environment which can
-    # require manual reviewer approval — see .github/RELEASING.md.
-    environment:
-      name: ${{ contains(github.ref_name, '-') && 'dev-release' || 'release' }}
+    # Same Environment as pre-release tags. Auto-approves; only the production
+    # `release` Environment requires reviewer approval.
+    environment: dev-release
 
     steps:
       - name: Checkout GhosttyWin32
@@ -30,6 +34,28 @@ jobs:
           ref: feature/swapchain-panel-api
           path: ghostty
 
+      - name: Compute dev version
+        id: version
+        shell: pwsh
+        run: |
+          # MSIX manifest Version is X.Y.Z.W (each part is UInt16, max 65535).
+          # We use 0.3.0.<run_number> so each CI build is monotonically
+          # increasing within a base version. Bump $base manually before
+          # cutting a real v0.3.0 production tag so dev-builds for the next
+          # cycle (0.4.x) don't collide.
+          $base = "0.3.0"
+          $runNumber = "${{ github.run_number }}"
+          $msixVersion = "$base.$runNumber"
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $today = (Get-Date).ToString("yyyy-MM-dd")
+          $displayVersion = "dev-$today-$shortSha"
+
+          "msix_version=$msixVersion" >> $env:GITHUB_OUTPUT
+          "display_version=$displayVersion" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          Write-Host "MSIX manifest Version : $msixVersion"
+          Write-Host "Display version       : $displayVersion"
+
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -40,13 +66,8 @@ jobs:
         run: |
           cd ghostty
           zig build -Doptimize=ReleaseSafe -Drenderer=directx
-          # GhosttyWin32App.vcxproj links against ../ghostty/ghostty.{dll,lib,h}
-          # at the workspace root; copy the canonical artifacts there.
           Copy-Item zig-out/lib/ghostty.dll ../ghostty/
           Copy-Item include/ghostty.h ../ghostty/
-          # The Zig build writes the small import lib into the cache, not
-          # zig-out. Hunt for the most recently produced one (~60 KB) and
-          # copy it next to the dll.
           $searchPaths = @(".")
           if ($env:ZIG_LOCAL_CACHE_DIR) { $searchPaths += $env:ZIG_LOCAL_CACHE_DIR }
           if (Test-Path "$env:LOCALAPPDATA\zig") { $searchPaths += "$env:LOCALAPPDATA\zig" }
@@ -71,22 +92,13 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore GhosttyWin32.sln
 
-      - name: Set MSIX version from tag
+      - name: Patch manifest version
         shell: pwsh
         run: |
-          # Tag "vX.Y.Z" -> manifest Version "X.Y.Z.0". Strip any -rcN / -beta
-          # suffix because appxmanifest only accepts a four-part numeric.
-          $tag = "${{ github.ref_name }}"
-          $version = ($tag.TrimStart('v') -split '-')[0]
-          $fullVersion = "$version.0"
           $manifestPath = "GhosttyWin32 (Package)/Package.appxmanifest"
           (Get-Content $manifestPath) `
-            -replace 'Version="[\d\.]+"', "Version=`"$fullVersion`"" |
+            -replace 'Version="[\d\.]+"', "Version=`"${{ steps.version.outputs.msix_version }}`"" |
             Set-Content $manifestPath -NoNewline
-          Write-Host "Set MSIX version to $fullVersion"
-          # Echo for downstream steps.
-          "msix_version=$fullVersion" >> $env:GITHUB_ENV
-          "release_version=$version" >> $env:GITHUB_ENV
 
       - name: Decode signing certificate
         shell: pwsh
@@ -102,9 +114,7 @@ jobs:
           [System.IO.File]::WriteAllBytes("ghostty-signing.pfx", $pfxBytes)
 
           # Derive the public cer from the PFX so the release artifact and the
-          # signing key are guaranteed to match. We don't commit Ghostty.cer
-          # because the source of truth is the PFX in Secrets — keeping a
-          # second copy in git invites drift.
+          # signing key are guaranteed to match. See release.yml for rationale.
           $pfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
             (Resolve-Path "ghostty-signing.pfx").Path,
             $env:PFX_PASSWORD,
@@ -149,32 +159,65 @@ jobs:
             Write-Error "Built MSIX not found under AppPackages/"
             exit 1
           }
-          $renamed = "Ghostty-$env:release_version-x64.msix"
+          $renamed = "Ghostty-dev-x64.msix"
           Copy-Item $msix.FullName $renamed
-          Write-Host "Release artifact: $renamed (from $($msix.FullName))"
           "msix_path=$renamed" >> $env:GITHUB_OUTPUT
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ steps.locate.outputs.msix_path }}
+      # Replace the dev-build release in-place. Deleting the old release first
+      # gives us a clean slate — softprops/action-gh-release otherwise appends
+      # assets which would pile up across runs. We swallow errors so the very
+      # first run (no prior release) doesn't fail.
+      - name: Delete previous dev-build release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete dev-build --yes --cleanup-tag 2>$null
+          $LASTEXITCODE = 0
+          Write-Host "Cleared any previous dev-build release."
+
+      - name: Create dev-build release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $shortSha = "${{ steps.version.outputs.short_sha }}"
+          $now = Get-Date -Format 'yyyy-MM-dd HH:mm UTC'
+          $repo = "${{ github.repository }}"
+          $runId = "${{ github.run_id }}"
+          $runNum = "${{ github.run_number }}"
+          $sha = "${{ github.sha }}"
+          $msixVer = "${{ steps.version.outputs.msix_version }}"
+
+          $body = @"
+**Dev build** — automated build of the latest ``dev`` branch.
+
+⚠️ This is **not** a stable release. Expect bugs.
+
+## Install
+
+1. Download ``Ghostty-dev-x64.msix`` and ``Ghostty.cer``
+2. Right-click ``Ghostty.cer`` → Install Certificate → **Local Machine** →
+   **Trusted People** (UAC prompt; one-time per machine)
+3. Double-click the ``.msix`` to install
+
+If you previously installed Ghostty (stable or dev), this MSIX upgrades it
+in place.
+
+## Source
+
+| | |
+|---|---|
+| Branch | ``dev`` |
+| Commit | [``$shortSha``](https://github.com/$repo/commit/$sha) |
+| Build  | [\#$runNum](https://github.com/$repo/actions/runs/$runId) |
+| MSIX version | ``$msixVer`` |
+| Built | $now |
+"@
+
+          gh release create dev-build `
+            --title "Dev build (${{ steps.version.outputs.display_version }})" `
+            --notes "$body" `
+            --prerelease `
+            "${{ steps.locate.outputs.msix_path }}" `
             Ghostty.cer
-          generate_release_notes: true
-          # Tags with a hyphen are pre-releases (rc / beta / alpha).
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          body: |
-            ## Installation
-
-            ### Scoop (recommended)
-            ```
-            scoop install ghostty
-            ```
-
-            ### Manual install
-            1. Download `Ghostty.cer` and `Ghostty-${{ env.release_version }}-x64.msix`
-            2. Right-click `Ghostty.cer` → Install Certificate → Local Machine →
-               Trusted People (UAC prompt will appear)
-            3. Double-click the `.msix` to install
-
-            See the README for full setup details.
