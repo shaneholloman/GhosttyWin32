@@ -5,6 +5,8 @@
 #include "GhosttyApp.h"
 #include "ImeBuffer.h"
 #include "Tab.h"
+#include "TabFactory.h"
+#include "TabIdAllocator.h"
 #include "Tabs.h"
 
 namespace winrt::GhosttyWin32::implementation
@@ -44,7 +46,11 @@ namespace winrt::GhosttyWin32::implementation
         HWND m_hwnd = nullptr;
         winrt::Windows::UI::Text::Core::CoreTextEditContext m_editContext{ nullptr };
         ImeBuffer m_ime;
+        TabIdAllocator m_tabIds;
         Tabs m_tabs;
+        // Constructed once ghostty is initialized — needs the app handle
+        // and HWND, neither available until InitGhostty has run.
+        std::unique_ptr<TabFactory> m_tabFactory;
     };
 }
 

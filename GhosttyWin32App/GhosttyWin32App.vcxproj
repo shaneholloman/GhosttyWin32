@@ -131,6 +131,9 @@
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="Tab.h" />
+    <ClInclude Include="TabFactory.h" />
+    <ClInclude Include="TabId.h" />
+    <ClInclude Include="TabIdAllocator.h" />
   </ItemGroup>
   <ItemGroup>
     <ApplicationDefinition Include="App.xaml" />

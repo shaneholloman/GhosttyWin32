@@ -44,6 +44,20 @@ public:
         return nullptr;
     }
 
+    // Look up a Tab by the monotonic ID it was assigned at creation. Used
+    // by the close_surface_cb callback path: ghostty hands us back the ID
+    // we placed in cfg.userdata, and the dispatched lambda calls this on
+    // the UI thread. Returns nullptr if the user already closed the tab
+    // via the UI before the dispatched close arrived (or if the ID is
+    // otherwise unknown), making stale callbacks a safe no-op.
+    Tab* FindById(TabId id) const {
+        if (!id) return nullptr;
+        for (auto& t : m_tabs) {
+            if (t && t->Id() == id) return t.get();
+        }
+        return nullptr;
+    }
+
     // The Tab whose TabViewItem is currently selected in the given TabView,
     // or nullptr if there is no selection / no match. Encapsulates the
     // SelectedItem → TabViewItem → match dance the input handlers all need.

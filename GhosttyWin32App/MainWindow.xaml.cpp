@@ -622,10 +622,35 @@ namespace winrt::GhosttyWin32::implementation
             HWND hwnd = g_mainWindow ? g_mainWindow->m_hwnd : nullptr;
             Clipboard::write(hwnd, Encoding::toUtf16(content[0].data));
         };
-        // TODO: ghostty doesn't call close_surface_cb on shell exit (see ghostty#34)
-        rtConfig.close_surface_cb = [](void*, bool) {};
+        // Shell exited (e.g. user typed `exit`), or ghostty asked to close
+        // the surface for any other reason. The userdata is the Tab ID
+        // we set in TabFactory::Make. Dispatch the TabView mutation to
+        // the next UI tick to mirror the GHOSTTY_ACTION_CLOSE_TAB handler.
+        rtConfig.close_surface_cb = [](void* userdata, bool /*process_alive*/) {
+            if (!g_mainWindow || !userdata) return;
+            TabId id = TabId::FromUserdata(userdata);
+            auto mw = g_mainWindow;
+            mw->DispatcherQueue().TryEnqueue([mw, id]() {
+                auto* t = mw->m_tabs.FindById(id);
+                if (!t) return; // Tab already closed via the UI
+                auto item = t->Item();
+                auto tv = mw->TabView();
+                uint32_t idx = 0;
+                if (tv.TabItems().IndexOf(item, idx)) {
+                    tv.TabItems().RemoveAt(idx);
+                }
+                DwmFlush();
+                mw->m_tabs.Remove(item);
+                if (tv.TabItems().Size() == 0) {
+                    mw->Close();
+                }
+            });
+        };
 
         m_ghostty = GhosttyApp::Create(rtConfig);
+        if (m_ghostty && m_hwnd) {
+            m_tabFactory = std::make_unique<TabFactory>(m_ghostty->Handle(), m_hwnd, m_tabIds);
+        }
     }
 
     void MainWindow::CreateTab()
@@ -684,31 +709,30 @@ namespace winrt::GhosttyWin32::implementation
             initialH = static_cast<uint32_t>(prevPanel.ActualHeight());
         }
 
-        // Wrap Tab::Create in SEH guard so a hardware exception in the
-        // NVIDIA driver during ghostty_surface_new (e.g. dx_create_texture
-        // crash) doesn't kill the whole app and take every other tab
-        // with it. The C++ work happens inside the callback below.
-        auto app = m_ghostty->Handle();
-        auto hwnd = m_hwnd;
+        // Wrap TabFactory::Make in SEH guard so a hardware exception in
+        // the NVIDIA driver during ghostty_surface_new (e.g.
+        // dx_create_texture crash) doesn't kill the whole app and take
+        // every other tab with it. The C++ work happens inside the
+        // callback below.
+        if (!m_tabFactory) return;
         struct CreateCtx {
             muxc::SwapChainPanel const* panel;
             muxc::TabViewItem const* item;
-            ghostty_app_t app;
-            HWND hwnd;
+            TabFactory* factory;
             std::function<void()> onActivated;
             uint32_t initialWidth;
             uint32_t initialHeight;
             std::unique_ptr<Tab> result;
         };
-        CreateCtx ctx{ &panel, &item, app, hwnd, std::move(onActivated), initialW, initialH, nullptr };
+        CreateCtx ctx{ &panel, &item, m_tabFactory.get(), std::move(onActivated), initialW, initialH, nullptr };
         int ok = RunSEHGuarded([](void* arg) noexcept {
             auto* c = static_cast<CreateCtx*>(arg);
-            c->result = Tab::Create(*c->panel, *c->item, c->app, c->hwnd, std::move(c->onActivated), c->initialWidth, c->initialHeight);
+            c->result = c->factory->Make(*c->panel, *c->item, std::move(c->onActivated), c->initialWidth, c->initialHeight);
         }, &ctx);
 
         std::unique_ptr<Tab> tab = std::move(ctx.result);
         if (!ok) {
-            // SEH caught a hardware exception inside Tab::Create — almost
+            // SEH caught a hardware exception inside TabFactory::Make — almost
             // always the NVIDIA driver memcpy crash. Process state is
             // unreliable from here (heap locks may be stuck, driver kernel
             // state corrupted, etc.) so don't try to continue.
@@ -731,7 +755,7 @@ namespace winrt::GhosttyWin32::implementation
             return;
         }
         if (!tab) {
-            // Tab::Create returned null cleanly (handle / attach / surface
+            // TabFactory::Make returned null cleanly (handle / attach / surface
             // creation failed but no hardware exception). Heap state is
             // intact, so just drop the orphan tab item and continue.
             auto items = tv.TabItems();
