@@ -3,6 +3,7 @@
 #include "Clipboard.h"
 #include "KeyModifiers.h"
 #include "Encoding.h"
+#include "SEHGuard.h"
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -22,22 +23,6 @@ namespace {
         DWORD len = GetTempPathW(MAX_PATH, buf);
         if (len == 0) return L"GhosttyWin32_running.flag";
         return std::filesystem::path(buf) / L"GhosttyWin32_running.flag";
-    }
-
-    // SEH "trampoline": isolates a callable invocation behind __try/__except.
-    // MSVC's /EHsc refuses __try in any function that has C++ unwinding
-    // (i.e. anything dealing with C++ objects). This helper has only raw
-    // C types in its frame, so it compiles. The C++ work lives in the
-    // callback we invoke through a function pointer — if that callback
-    // raises a hardware exception, we swallow it here.
-    extern "C" int RunSEHGuarded(void (*fn)(void*), void* ctx) noexcept {
-        __try {
-            fn(ctx);
-            return 1;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            OutputDebugStringA("SEH caught hardware exception inside guarded call\n");
-            return 0;
-        }
     }
 }
 
@@ -110,265 +95,72 @@ namespace winrt::GhosttyWin32::implementation
                 this->SystemBackdrop(backdrop);
             }
 
-            // IME via CoreTextEditContext
-            {
-                namespace txtCore = winrt::Windows::UI::Text::Core;
-                auto manager = txtCore::CoreTextServicesManager::GetForCurrentView();
-                m_editContext = manager.CreateEditContext();
-                m_editContext.InputPaneDisplayPolicy(txtCore::CoreTextInputPaneDisplayPolicy::Manual);
-                m_editContext.InputScope(txtCore::CoreTextInputScope::Default);
-
-                m_editContext.TextRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextTextRequestedEventArgs const& args) {
-                    args.Request().Text(winrt::hstring(m_ime.paddedText()));
-                });
-
-                m_editContext.SelectionRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextSelectionRequestedEventArgs const& args) {
-                    int32_t pos = m_ime.selectionPosition();
-                    args.Request().Selection({ pos, pos });
-                });
-
-                m_editContext.TextUpdating([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextTextUpdatingEventArgs const& args) {
-                    auto range = args.Range();
-                    auto newText = args.Text();
-                    m_ime.applyTextUpdate(range.StartCaretPosition, range.EndCaretPosition,
-                                          newText.c_str(), newText.size());
-
-                    auto* tab = ActiveTab();
-                    if (!tab || !tab->Surface()) return;
-
-                    if (m_ime.composing()) {
-                        if (m_ime.text().empty()) {
-                            ghostty_surface_preedit(tab->Surface(), nullptr, 0);
-                        } else {
-                            auto utf8 = Encoding::toUtf8(m_ime.text());
-                            if (!utf8.empty())
-                                ghostty_surface_preedit(tab->Surface(), utf8.c_str(), utf8.size());
+            // On every window (re)activation: pull keyboard focus onto
+            // the active terminal and re-attach IME. Two reasons to
+            // anchor both jobs on this event:
+            //
+            //   * Focus on initial show. The first tab's onActivated
+            //     callback calls ShowWindow(SW_SHOW), which only posts
+            //     WM_ACTIVATE — WinUI's own activation logic runs later
+            //     in the message pump and assigns default focus to its
+            //     internal first-focusable element. Calling Focus
+            //     directly inside onActivated (or through a Low-priority
+            //     dispatcher tick) races against that and loses
+            //     intermittently. The Activated event itself is signalled
+            //     after WinUI has finished its default-focus pass, so a
+            //     Focus call here is the last write and reliably sticks.
+            //     Subsequent alt-tab returns ride the same path: focus
+            //     comes back to the terminal, which is what users expect
+            //     of a terminal app where there's nothing else to focus.
+            //
+            //   * IME re-attach. XAML's GotFocus/LostFocus on
+            //     TerminalControl don't fire on window de/activation
+            //     (focus is logically retained on the focused element
+            //     across alt-tab), so we forward window state changes to
+            //     the active control's EditContext directly. Without
+            //     this, switching focus to another window and back leaves
+            //     the OS-side text-services manager pointing at a
+            //     detached EditContext and IME stays off even if the
+            //     OS-level IME toggle is on.
+            //
+            // weak_ref + try/catch instead of `[this]`: WindowActivated
+            // fires during shutdown after MainWindow has started
+            // disposing — m_tabs is mid-destruction and ActiveControl()
+            // can return a dangling TerminalControl pointer. Calling
+            // NotifyImeFocusLeave on it AVs at the m_editContext
+            // member offset inside microsoft.ui.xaml.dll. The weak_ref
+            // path bails cleanly; the catch covers RO_E_CLOSED if
+            // TabView() is hit on a torn-down window.
+            auto weakActivated = get_weak();
+            Activated([weakActivated](winrt::Windows::Foundation::IInspectable const&,
+                                      winrt::Microsoft::UI::Xaml::WindowActivatedEventArgs const& args) {
+                auto self = weakActivated.get();
+                if (!self) return;
+                try {
+                    using State = winrt::Microsoft::UI::Xaml::WindowActivationState;
+                    if (args.WindowActivationState() == State::Deactivated) {
+                        if (auto* tc = self->ActiveControl()) {
+                            tc->NotifyImeFocusLeave();
+                        }
+                    } else {
+                        if (auto* tab = self->ActiveTab()) {
+                            tab->Focus();
+                        }
+                        if (auto* tc = self->ActiveControl()) {
+                            tc->NotifyImeFocusEnter();
                         }
                     }
-                    if (m_ghostty) m_ghostty->Tick();
-                    ghostty_surface_refresh(tab->Surface());
-                });
-
-                m_editContext.CompositionStarted([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextCompositionStartedEventArgs const&) {
-                    m_ime.compositionStarted();
-                });
-
-                m_editContext.CompositionCompleted([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextCompositionCompletedEventArgs const&) {
-                    auto* tab = ActiveTab();
-                    if (tab && tab->Surface()) {
-                        ghostty_surface_preedit(tab->Surface(), nullptr, 0);
-                        auto utf8 = Encoding::toUtf8(m_ime.text());
-                        if (!utf8.empty()) {
-                            ghostty_surface_text(tab->Surface(), utf8.c_str(), utf8.size());
-                        }
-                        if (m_ghostty) m_ghostty->Tick();
-                        ghostty_surface_refresh(tab->Surface());
-                    }
-                    m_ime.compositionCompleted();
-                });
-
-                m_editContext.LayoutRequested([this](txtCore::CoreTextEditContext const&, txtCore::CoreTextLayoutRequestedEventArgs const& args) {
-                    auto* tab = ActiveTab();
-                    if (!tab || !tab->Surface() || !m_hwnd) return;
-                    double x = 0, y = 0, w = 0, h = 0;
-                    ghostty_surface_ime_point(tab->Surface(), &x, &y, &w, &h);
-                    POINT screenPt = { (LONG)x, (LONG)y };
-                    ClientToScreen(m_hwnd, &screenPt);
-                    winrt::Windows::Foundation::Rect bounds{
-                        (float)screenPt.x, (float)screenPt.y, (float)w, (float)h };
-                    args.Request().LayoutBounds().ControlBounds(bounds);
-                    args.Request().LayoutBounds().TextBounds(bounds);
-                });
-
-                m_editContext.FocusRemoved([this](txtCore::CoreTextEditContext const&, auto&&) {
-                    if (m_ime.composing()) {
-                        m_ime.reset();
-                        auto* tab = ActiveTab();
-                        if (tab && tab->Surface())
-                            ghostty_surface_preedit(tab->Surface(), nullptr, 0);
-                    }
-                });
-            }
-
-            // Re-attach IME when window regains activation. The init handler
-            // above runs once and calls NotifyFocusEnter only after the first
-            // tab is created; without this, switching focus to another window
-            // and back leaves CoreTextEditContext detached, so IME stays off
-            // even if the OS-level IME toggle is on.
-            Activated([this](winrt::Windows::Foundation::IInspectable const&,
-                             winrt::Microsoft::UI::Xaml::WindowActivatedEventArgs const& args) {
-                if (!m_editContext) return;
-                using State = winrt::Microsoft::UI::Xaml::WindowActivationState;
-                if (args.WindowActivationState() == State::Deactivated) {
-                    m_editContext.NotifyFocusLeave();
-                } else if (ActiveTab()) {
-                    m_editContext.NotifyFocusEnter();
+                } catch (winrt::hresult_error const&) {
                 }
             });
 
             auto tv = TabView();
             SetTitleBar(DragRegion());
 
-            // Window-level input handling (same approach as Windows Terminal)
-            auto root = Content().as<winrt::Microsoft::UI::Xaml::UIElement>();
-
-            root.KeyDown([this](auto&&, winrt::Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
-                auto* tab = ActiveTab();
-                if (!tab || !tab->Surface()) return;
-
-                int vk = static_cast<int>(args.Key());
-                UINT scanCode = args.KeyStatus().ScanCode;
-                bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
-                bool shift = GetKeyState(VK_SHIFT) & 0x8000;
-
-                // IME is processing this key
-                if (vk == VK_PROCESSKEY || m_ime.composing()) return;
-
-                // Ctrl+C: copy if selection exists, otherwise send SIGINT
-                if (ctrl && !shift && vk == 'C') {
-                    if (ghostty_surface_has_selection(tab->Surface())) {
-                        ghostty_text_s text = {};
-                        if (ghostty_surface_read_selection(tab->Surface(), &text) && text.text && text.text_len > 0) {
-                            Clipboard::write(m_hwnd, Encoding::toUtf16(text.text, static_cast<int>(text.text_len)));
-                            ghostty_surface_free_text(tab->Surface(), &text);
-                        }
-                        ghostty_surface_mouse_button(tab->Surface(), GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
-                        ghostty_surface_mouse_button(tab->Surface(), GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
-                        args.Handled(true);
-                        return;
-                    }
-                }
-
-                // Ctrl+V: paste from clipboard
-                if (ctrl && !shift && vk == 'V') {
-                    auto utf8 = Encoding::toUtf8(Clipboard::read(m_hwnd));
-                    if (!utf8.empty()) {
-                        ghostty_surface_text(tab->Surface(), utf8.c_str(), utf8.size());
-                    }
-                    if (m_ghostty) m_ghostty->Tick();
-                    ghostty_surface_refresh(tab->Surface());
-                    args.Handled(true);
-                    return;
-                }
-
-                // Compute the unshifted codepoint (VK translated with no
-                // modifiers held) so unicode-keyed bindings can match.
-                // Without this, Binding.Set.getEvent() in
-                // input/Binding.zig:2622 falls through every lookup path
-                // for entries like `unicode = 't'` (ctrl+shift+t = new_tab,
-                // ctrl+shift+w = close_tab, etc.) and returns null. The
-                // physical-keyed bindings (ctrl+tab = next_tab,
-                // ctrl+shift+arrow_left = previous_tab) already match via
-                // keycode; this fixes the unicode ones.
-                //
-                // We keep text encoding on the separate ghostty_surface_text
-                // path below — passing a `text` field here would
-                // double-input because encodeKey also writes utf8 to the
-                // pty.
-                BYTE plainState[256] = {};
-                wchar_t unshiftedChars[4] = {};
-                int unshiftedCount = ToUnicode(vk, scanCode, plainState, unshiftedChars, 4, 0);
-                // Drain any dead-key state ToUnicode left in plainState so
-                // the next real keystroke isn't affected.
-                wchar_t drain[4] = {};
-                ToUnicode(VK_SPACE, 0x39, plainState, drain, 4, 0);
-
-                // Send key event to ghostty (binding match happens here)
-                ghostty_input_key_s keyEvent = {};
-                keyEvent.action = GHOSTTY_ACTION_PRESS;
-                keyEvent.keycode = scanCode;
-                if (args.KeyStatus().IsExtendedKey) keyEvent.keycode |= 0xE000;
-                keyEvent.mods = currentMods();
-                if (unshiftedCount > 0 && unshiftedChars[0] >= 0x20) {
-                    keyEvent.unshifted_codepoint = static_cast<uint32_t>(unshiftedChars[0]);
-                }
-                bool consumed = ghostty_surface_key(tab->Surface(), keyEvent);
-
-                // Translate to text using ToUnicode (replaces CharacterReceived).
-                // Skip when the binding consumed the key — otherwise
-                // ctrl+shift+t would type "T" into the pty in addition to
-                // opening a new tab.
-                if (!consumed) {
-                    BYTE kbState[256] = {};
-                    GetKeyboardState(kbState);
-                    wchar_t chars[4] = {};
-                    int charCount = ToUnicode(vk, scanCode, kbState, chars, 4, 0);
-                    if (charCount > 0 && chars[0] >= 0x20) {
-                        char utf8[16] = {};
-                        int len = WideCharToMultiByte(CP_UTF8, 0, chars, charCount, utf8, sizeof(utf8), nullptr, nullptr);
-                        if (len > 0) {
-                            ghostty_surface_text(tab->Surface(), utf8, len);
-                        }
-                    }
-                }
-
-                if (m_ghostty) m_ghostty->Tick();
-                ghostty_surface_refresh(tab->Surface());
-                args.Handled(true);
-            });
-
-            // Mouse input on root
-            root.PointerMoved([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
-                auto* tab = ActiveTab();
-                if (!tab || !tab->Surface()) return;
-                winrt::Microsoft::UI::Input::PointerPoint point = args.GetCurrentPoint(tab->Panel());
-                winrt::Windows::Foundation::Point pos = point.Position();
-                ghostty_surface_mouse_pos(tab->Surface(), pos.X, pos.Y, currentMods());
-            });
-
-            root.PointerPressed([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
-                auto* tab = ActiveTab();
-                if (!tab || !tab->Surface()) return;
-                winrt::Microsoft::UI::Input::PointerPoint point = args.GetCurrentPoint(tab->Panel());
-                winrt::Microsoft::UI::Input::PointerPointProperties props = point.Properties();
-                ghostty_input_mouse_button_e btn;
-                if (props.IsLeftButtonPressed()) btn = GHOSTTY_MOUSE_LEFT;
-                else if (props.IsRightButtonPressed()) {
-                    // Right-click: copy selection if exists
-                    if (ghostty_surface_has_selection(tab->Surface())) {
-                        ghostty_text_s text = {};
-                        if (ghostty_surface_read_selection(tab->Surface(), &text) && text.text && text.text_len > 0) {
-                            Clipboard::write(m_hwnd, Encoding::toUtf16(text.text, static_cast<int>(text.text_len)));
-                            ghostty_surface_free_text(tab->Surface(), &text);
-                        }
-                        ghostty_surface_mouse_button(tab->Surface(), GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
-                        ghostty_surface_mouse_button(tab->Surface(), GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, (ghostty_input_mods_e)0);
-                        return;
-                    }
-                    btn = GHOSTTY_MOUSE_RIGHT;
-                }
-                else return; // Ignore middle-click and others
-                ghostty_surface_mouse_button(tab->Surface(), GHOSTTY_MOUSE_PRESS, btn, currentMods());
-            });
-
-            root.PointerReleased([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
-                auto* tab = ActiveTab();
-                if (!tab || !tab->Surface()) return;
-                ghostty_surface_mouse_button(tab->Surface(), GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, currentMods());
-            });
-
-            root.PointerWheelChanged([this](auto&&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
-                auto* tab = ActiveTab();
-                if (!tab || !tab->Surface()) return;
-                winrt::Microsoft::UI::Input::PointerPoint point = args.GetCurrentPoint(tab->Panel());
-                winrt::Microsoft::UI::Input::PointerPointProperties props = point.Properties();
-                int delta = props.MouseWheelDelta();
-                double scrollY = (double)delta / 120.0;
-                ghostty_input_scroll_mods_t smods = {};
-                ghostty_surface_mouse_scroll(tab->Surface(), 0, scrollY, smods);
-                args.Handled(true);
-            });
-
-            root.KeyUp([this](auto&&, winrt::Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
-                auto* tab = ActiveTab();
-                if (!tab || !tab->Surface()) return;
-                ghostty_input_key_s keyEvent = {};
-                keyEvent.action = GHOSTTY_ACTION_RELEASE;
-                keyEvent.keycode = args.KeyStatus().ScanCode;
-                if (args.KeyStatus().IsExtendedKey) keyEvent.keycode |= 0xE000;
-                keyEvent.mods = currentMods();
-                ghostty_surface_key(tab->Surface(), keyEvent);
-            });
+            // Pointer / keyboard / IME routing all live on
+            // TerminalControl — each instance hooks the events on
+            // itself and forwards directly to its own ghostty surface.
+            // No window-level input handler is needed here.
 
             // DPI change handling (deferred until XamlRoot is available)
             Content().as<winrt::Microsoft::UI::Xaml::FrameworkElement>().Loaded([this](auto&&, auto&&) {
@@ -376,9 +168,12 @@ namespace winrt::GhosttyWin32::implementation
                     if (!m_hwnd) return;
                     UINT dpi = GetDpiForWindow(m_hwnd);
                     double scale = (double)dpi / 96.0;
+                    // Today every tab has a single TerminalControl. With
+                    // future pane support this would walk each tab's
+                    // pane tree and apply the scale to every leaf.
                     for (auto& t : m_tabs) {
-                        if (t->Surface()) {
-                            ghostty_surface_set_content_scale(t->Surface(), scale, scale);
+                        if (auto* tc = t->ActiveControl(); tc && tc->Surface()) {
+                            ghostty_surface_set_content_scale(tc->Surface(), scale, scale);
                         }
                     }
                 });
@@ -400,16 +195,108 @@ namespace winrt::GhosttyWin32::implementation
                 CreateTab();
             });
 
+            // TabView's built-in AddTabButton (the "+") is focusable by
+            // default, and its Click cycle holds onto focus across the
+            // tab-creation sequence — so even after the new tab is
+            // selected and we Focus() the new TerminalControl, the +
+            // button retains keyboard focus and the next Enter press
+            // re-fires its Click (creating yet another tab). Walking
+            // TabView's template to flip IsTabStop/AllowFocusOnInteraction
+            // on the AddButton breaks that retention.
+            //
+            // The template only materialises after Loaded, so we hook
+            // TabView.Loaded and walk its visual tree once.
+            tv.Loaded([](winrt::Windows::Foundation::IInspectable const& sender, auto&&) {
+                auto tv = sender.try_as<muxc::TabView>();
+                if (!tv) return;
+                namespace mux = winrt::Microsoft::UI::Xaml;
+                std::function<bool(mux::DependencyObject const&)> walk =
+                    [&walk](mux::DependencyObject const& parent) -> bool {
+                        int count = mux::Media::VisualTreeHelper::GetChildrenCount(parent);
+                        for (int i = 0; i < count; ++i) {
+                            auto child = mux::Media::VisualTreeHelper::GetChild(parent, i);
+                            if (auto fe = child.try_as<mux::FrameworkElement>()) {
+                                if (fe.Name() == L"AddButton") {
+                                    if (auto button = child.try_as<muxc::Button>()) {
+                                        button.IsTabStop(false);
+                                        button.AllowFocusOnInteraction(false);
+                                    }
+                                    return true;
+                                }
+                            }
+                            if (walk(child)) return true;
+                        }
+                        return false;
+                    };
+                walk(tv);
+            });
+
             tv.TabCloseRequested([this](muxc::TabView const& sender, muxc::TabViewTabCloseRequestedEventArgs const& args) {
                 auto item = args.Tab();
+                // Detach the control BEFORE removing it from TabView.
+                // Detach calls ISwapChainPanelNative2::SetSwapChainHandle(nullptr)
+                // on the inner panel, and that call AVs at +0x1F8 inside
+                // microsoft.ui.xaml.dll if the panel has already been
+                // unparented from the live visual tree (reproducer:
+                // Ctrl+Shift+W long-press across multiple tabs, where
+                // XAML hasn't finished processing the previous RemoveAt
+                // when the next Detach kicks in). Doing it pre-RemoveAt
+                // keeps the panel in the live tree for the duration of
+                // SetSwapChainHandle. Detach is idempotent, so the
+                // ~Tab → ~TerminalControl path runs it again as a no-op.
+                if (auto* t = m_tabs.FindByItem(item)) {
+                    if (auto* tc = t->ActiveControl()) {
+                        tc->Detach();
+                    }
+                }
                 uint32_t idx = 0;
                 if (sender.TabItems().IndexOf(item, idx)) {
                     sender.TabItems().RemoveAt(idx);
                 }
                 DwmFlush();              // wait for compositor to release
-                m_tabs.Remove(item);     // Tab destructor handles teardown
                 if (sender.TabItems().Size() == 0) {
+                    // Last tab: defer Tab object destruction to
+                    // ~MainWindow's m_tabs.Clear. Tearing down the
+                    // focused control synchronously here leaves XAML's
+                    // focus subsystem holding a stale pointer that AVs
+                    // at +0x1F8 once mw->Close() kicks off window
+                    // teardown — same path as a normal title-bar X
+                    // close, which works fine precisely because XAML
+                    // finishes its own focus cleanup before our
+                    // destructors run.
                     this->Close();
+                } else {
+                    m_tabs.Remove(item);
+                }
+            });
+
+            // Whenever the selected tab changes — explicit click on a
+            // header, AddTabButton creating a new tab, keybind switch,
+            // auto-reselect after a close — pull focus into the new
+            // active TerminalControl. Without this, focus stays on
+            // whatever element triggered the selection (most painfully:
+            // the AddTabButton, whose IsDefault-like Enter-handling
+            // would create yet another tab on the next Enter keystroke).
+            // TerminalControl is a UserControl with IsTabStop=true so
+            // the Focus call actually moves focus, unlike the bare
+            // SwapChainPanel from before the refactor.
+            //
+            // weak_ref instead of `this`: TabView fires SelectionChanged
+            // during shutdown as TabItems is cleared, after MainWindow
+            // has started disposing — a raw `this->TabView()` call then
+            // throws RO_E_CLOSED on the disposed window.
+            auto weakSelf = get_weak();
+            tv.SelectionChanged([weakSelf](auto&&, auto&&) {
+                auto self = weakSelf.get();
+                if (!self) return;
+                // weak_ref.get() can return non-null briefly while the
+                // window is mid-dispose, in which case TabView() throws
+                // RO_E_CLOSED. Swallow — focus restoration is moot then.
+                try {
+                    if (auto* tab = self->ActiveTab()) {
+                        tab->Focus();
+                    }
+                } catch (winrt::hresult_error const&) {
                 }
             });
 
@@ -442,8 +329,10 @@ namespace winrt::GhosttyWin32::implementation
             if (g_mainWindow->m_hwnd) ShowWindow(g_mainWindow->m_hwnd, SW_HIDE);
             for (auto& tab : g_mainWindow->m_tabs) {
                 if (!tab) continue;
-                HANDLE h = tab->SurfaceHandle();
-                if (h) CloseHandle(h);
+                if (auto* tc = tab->ActiveControl()) {
+                    HANDLE h = tc->CompositionHandle();
+                    if (h) CloseHandle(h);
+                }
             }
         }
         MessageBoxW(nullptr,
@@ -458,6 +347,12 @@ namespace winrt::GhosttyWin32::implementation
     Tab* MainWindow::ActiveTab()
     {
         return m_tabs.Active(TabView());
+    }
+
+    TerminalControl* MainWindow::ActiveControl()
+    {
+        auto* tab = ActiveTab();
+        return tab ? tab->ActiveControl() : nullptr;
     }
 
     void MainWindow::InitGhostty()
@@ -499,23 +394,26 @@ namespace winrt::GhosttyWin32::implementation
                 if (g_mainWindow && surface) {
                     auto mw = g_mainWindow;
                     mw->DispatcherQueue().TryEnqueue([mw, surface]() {
-                        // Mirror the TabCloseRequested handler: pull the
-                        // TabViewItem out of the TabView, DwmFlush so the
-                        // compositor releases its reference, then drop the
-                        // owning Tab. The Tab destructor frees the ghostty
-                        // surface and closes the composition handle.
+                        // Mirror the TabCloseRequested handler — see
+                        // there for why Detach runs before RemoveAt and
+                        // why the last tab's Tab destruction is deferred
+                        // to ~MainWindow.
                         auto* t = mw->m_tabs.FindBySurface(surface);
                         if (!t) return;
                         auto item = t->Item();
+                        if (auto* tc = t->ActiveControl()) {
+                            tc->Detach();
+                        }
                         auto tv = mw->TabView();
                         uint32_t idx = 0;
                         if (tv.TabItems().IndexOf(item, idx)) {
                             tv.TabItems().RemoveAt(idx);
                         }
                         DwmFlush();
-                        mw->m_tabs.Remove(item);
                         if (tv.TabItems().Size() == 0) {
                             mw->Close();
+                        } else {
+                            mw->m_tabs.Remove(item);
                         }
                     });
                 }
@@ -601,19 +499,19 @@ namespace winrt::GhosttyWin32::implementation
         };
         rtConfig.read_clipboard_cb = [](void*, ghostty_clipboard_e, void* state) -> bool {
             if (!g_mainWindow) return false;
-            auto* tab = g_mainWindow->ActiveTab();
-            if (!tab || !tab->Surface()) return false;
+            auto* tc = g_mainWindow->ActiveControl();
+            if (!tc || !tc->Surface()) return false;
             auto utf8 = Encoding::toUtf8(Clipboard::read(g_mainWindow->m_hwnd));
             if (utf8.empty()) return false;
-            ghostty_surface_complete_clipboard_request(tab->Surface(), utf8.c_str(), state, false);
+            ghostty_surface_complete_clipboard_request(tc->Surface(), utf8.c_str(), state, false);
             return true;
         };
         rtConfig.confirm_read_clipboard_cb = [](void*, const char* content, void* state, ghostty_clipboard_request_e) {
             // Auto-confirm clipboard reads
             if (g_mainWindow) {
-                auto* tab = g_mainWindow->ActiveTab();
-                if (tab && tab->Surface()) {
-                    ghostty_surface_complete_clipboard_request(tab->Surface(), content, state, true);
+                auto* tc = g_mainWindow->ActiveControl();
+                if (tc && tc->Surface()) {
+                    ghostty_surface_complete_clipboard_request(tc->Surface(), content, state, true);
                 }
             }
         };
@@ -634,15 +532,21 @@ namespace winrt::GhosttyWin32::implementation
                 auto* t = mw->m_tabs.FindById(id);
                 if (!t) return; // Tab already closed via the UI
                 auto item = t->Item();
+                // Same Detach-before-RemoveAt pattern as the other
+                // close paths — see TabCloseRequested.
+                if (auto* tc = t->ActiveControl()) {
+                    tc->Detach();
+                }
                 auto tv = mw->TabView();
                 uint32_t idx = 0;
                 if (tv.TabItems().IndexOf(item, idx)) {
                     tv.TabItems().RemoveAt(idx);
                 }
                 DwmFlush();
-                mw->m_tabs.Remove(item);
                 if (tv.TabItems().Size() == 0) {
                     mw->Close();
+                } else {
+                    mw->m_tabs.Remove(item);
                 }
             });
         };
@@ -658,16 +562,23 @@ namespace winrt::GhosttyWin32::implementation
         if (!m_ghostty || !m_hwnd) return;
         auto tv = TabView();
 
-        auto panel = muxc::SwapChainPanel();
-        panel.IsTabStop(true);
-        panel.IsHitTestVisible(true);
-        panel.AllowFocusOnInteraction(true);
+        // Each tab is a TerminalControl (UserControl wrapping a
+        // SwapChainPanel). Focus/IsTabStop/etc. are set in the XAML
+        // template, so no per-instance setup is needed here.
+        auto control = winrt::GhosttyWin32::TerminalControl();
 
         auto item = muxc::TabViewItem();
         static constexpr wchar_t kDefaultTabTitle[] = L" ";
         item.Header(box_value(kDefaultTabTitle));
         item.IsClosable(true);
-        item.Content(panel);
+        item.Content(control);
+        // Same focus-retention story as the AddTabButton: TabViewItem is
+        // a Control with IsTabStop=true by default, so clicking a tab
+        // header lands focus on the header itself rather than the inner
+        // TerminalControl. Selection still works without IsTabStop —
+        // it's driven by click, not keyboard tab order.
+        item.IsTabStop(false);
+        item.AllowFocusOnInteraction(false);
         tv.TabItems().Append(item);
         // Append-only — don't switch to the new tab yet. The SelectedItem
         // call (which is what makes the panel visible) is deferred to the
@@ -683,15 +594,17 @@ namespace winrt::GhosttyWin32::implementation
         auto onActivated = [weakThis, itemStrong, tvStrong]() {
             auto self = weakThis.get();
             if (!self) return;
+            // Setting SelectedItem realises the TerminalControl into
+            // the visual tree, which fires its Loaded handler. Loaded
+            // builds the per-control CoreTextEditContext (deferred
+            // there because EditContext registration only takes hold
+            // for an element that's actually in the live tree).
             tvStrong.SelectedItem(itemStrong);
-            if (auto* tab = self->m_tabs.FindByItem(itemStrong)) {
-                tab->Focus();
-            }
-            if (self->m_editContext) {
-                self->m_ime.reset();
-                self->m_editContext.NotifyFocusEnter();
-            }
             if (self->m_hwnd) ShowWindow(self->m_hwnd, SW_SHOW);
+            // Focus is taken in the Activated event handler that fires
+            // from the WM_ACTIVATE this ShowWindow posts. See the
+            // comment on that handler for why anchoring focus there is
+            // race-free, while a direct Focus() call here is not.
         };
 
         // Estimate the new panel's eventual size from the currently active
@@ -703,8 +616,8 @@ namespace winrt::GhosttyWin32::implementation
         // SelectedItem) and ghostty falls back to the main window's full
         // client rect, which is too tall by the tab strip height.
         uint32_t initialW = 0, initialH = 0;
-        if (auto* prev = ActiveTab()) {
-            auto const& prevPanel = prev->Panel();
+        if (auto* prevControl = ActiveControl()) {
+            auto prevPanel = prevControl->InnerPanel();
             initialW = static_cast<uint32_t>(prevPanel.ActualWidth());
             initialH = static_cast<uint32_t>(prevPanel.ActualHeight());
         }
@@ -716,7 +629,7 @@ namespace winrt::GhosttyWin32::implementation
         // callback below.
         if (!m_tabFactory) return;
         struct CreateCtx {
-            muxc::SwapChainPanel const* panel;
+            winrt::GhosttyWin32::TerminalControl const* control;
             muxc::TabViewItem const* item;
             TabFactory* factory;
             std::function<void()> onActivated;
@@ -724,10 +637,10 @@ namespace winrt::GhosttyWin32::implementation
             uint32_t initialHeight;
             std::unique_ptr<Tab> result;
         };
-        CreateCtx ctx{ &panel, &item, m_tabFactory.get(), std::move(onActivated), initialW, initialH, nullptr };
+        CreateCtx ctx{ &control, &item, m_tabFactory.get(), std::move(onActivated), initialW, initialH, nullptr };
         int ok = RunSEHGuarded([](void* arg) noexcept {
             auto* c = static_cast<CreateCtx*>(arg);
-            c->result = c->factory->Make(*c->panel, *c->item, std::move(c->onActivated), c->initialWidth, c->initialHeight);
+            c->result = c->factory->Make(*c->control, *c->item, std::move(c->onActivated), c->initialWidth, c->initialHeight);
         }, &ctx);
 
         std::unique_ptr<Tab> tab = std::move(ctx.result);
@@ -764,9 +677,10 @@ namespace winrt::GhosttyWin32::implementation
             return;
         }
 
-        // Focus / SW_SHOW / SelectedItem / NotifyFocusEnter are deferred
-        // to the onActivated callback fired from Tab once ghostty has
-        // presented its first frame.
+        // SelectedItem / SW_SHOW are deferred to the onActivated
+        // callback fired from Tab once ghostty has presented its first
+        // frame; focus + IME activation chain off SelectedItem via the
+        // TerminalControl's Loaded → Focus → GotFocus path.
         m_tabs.Add(std::move(tab));
     }
 

@@ -3,7 +3,6 @@
 #include "MainWindow.g.h"
 #include "ghostty.h"
 #include "GhosttyApp.h"
-#include "ImeBuffer.h"
 #include "Tab.h"
 #include "TabFactory.h"
 #include "TabIdAllocator.h"
@@ -38,14 +37,16 @@ namespace winrt::GhosttyWin32::implementation
         void InitGhostty();
         void CreateTab();
         Tab* ActiveTab();
+        // Convenience wrapper around ActiveTab()->ActiveControl(). Most
+        // input/IME paths only care about the focused TerminalControl,
+        // not the surrounding Tab — this skips the double deref.
+        TerminalControl* ActiveControl();
         // Swaps MaximizeGlyph between Maximize (E922) and Restore (E923)
         // depending on the current OverlappedPresenter state.
         void UpdateMaximizeGlyph();
 
         std::unique_ptr<GhosttyApp> m_ghostty;
         HWND m_hwnd = nullptr;
-        winrt::Windows::UI::Text::Core::CoreTextEditContext m_editContext{ nullptr };
-        ImeBuffer m_ime;
         TabIdAllocator m_tabIds;
         Tabs m_tabs;
         // Constructed once ghostty is initialized — needs the app handle
